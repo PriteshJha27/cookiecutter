@@ -1,0 +1,7 @@
+{
+    "project_name": "Langchain Project",
+    "project_slug": "{{ cookiecutter.project_name.lower().replace(' ', '_') }}",
+    "author_name": "Your Name",
+    "description": "A Langchain-based SDK for handling prompts, chains, and LLM interactions",
+    "openai_model_name": "gpt-4o-mini"
+}
