@@ -1,22 +1,130 @@
-from setuptools import setup, find_packages
+#!/bin/bash
 
-setup(
-    name="{{ cookiecutter.project_slug }}",
-    version="{{ cookiecutter.version }}",
-    author="{{ cookiecutter.author_name }}",
-    author_email="{{ cookiecutter.author_email }}",
-    description="{{ cookiecutter.project_description }}",
-    packages=find_packages(where="src"),
-    package_dir={"": "src"},
-    install_requires=[
-        "torch>=1.9.0",
-        "torchvision>=0.10.0",
-        "numpy>=1.19.5",
-        "pandas>=1.3.0",
-        "optuna>=2.9.1",
-        "shap>=0.39.0",
-        "lime>=0.2.0.1",
-        # Add other dependencies
-    ],
-    python_requires=f">={cookiecutter.python_version}",
-)
+# Function to create directory and __init__.py
+create_dir_with_init() {
+    mkdir -p "$1"
+    touch "$1/__init__.py"
+}
+
+# Create main template directory
+echo "Creating template structure..."
+mkdir -p cookiecutter-hpt-interpretability
+cd cookiecutter-hpt-interpretability
+
+# Create cookiecutter.json
+echo '{
+    "project_name": "HPT and Interpretability SDK",
+    "project_slug": "{{ cookiecutter.project_name.lower().replace(" ", "_").replace("-", "_") }}",
+    "author_name": "Your name",
+    "author_email": "your.email@example.com",
+    "project_description": "A toolkit for hyperparameter tuning and model interpretability",
+    "version": "0.1.0",
+    "python_version": "3.8"
+}' > cookiecutter.json
+
+# Create hooks directory
+create_dir_with_init "hooks"
+touch hooks/pre_gen_project.py
+touch hooks/post_gen_project.py
+
+# Create project template root directory
+mkdir -p "{{cookiecutter.project_slug}}"
+cd "{{cookiecutter.project_slug}}"
+
+# Create root level files
+touch README.md
+touch setup.py
+touch requirements.txt
+touch start.sh
+chmod +x start.sh
+
+# Create config structure
+create_dir_with_init "config"
+touch config/config.yml
+touch config/hpt_config.yml
+
+create_dir_with_init "config/model_config"
+touch config/model_config/vgg16.yml
+touch config/model_config/bert.yml
+
+# Create src structure
+mkdir -p "src/{{cookiecutter.project_slug}}"
+create_dir_with_init "src/{{cookiecutter.project_slug}}"
+
+# Create main source files
+touch "src/{{cookiecutter.project_slug}}/cli.py"
+touch "src/{{cookiecutter.project_slug}}/main.py"
+touch "src/{{cookiecutter.project_slug}}/router.py"
+touch "src/{{cookiecutter.project_slug}}/constants.py"
+
+# Create core module
+create_dir_with_init "src/{{cookiecutter.project_slug}}/core"
+touch "src/{{cookiecutter.project_slug}}/core/base_model.py"
+touch "src/{{cookiecutter.project_slug}}/core/base_trainer.py"
+touch "src/{{cookiecutter.project_slug}}/core/base_optimizer.py"
+
+# Create models module
+create_dir_with_init "src/{{cookiecutter.project_slug}}/models"
+create_dir_with_init "src/{{cookiecutter.project_slug}}/models/vision"
+touch "src/{{cookiecutter.project_slug}}/models/vision/vgg.py"
+create_dir_with_init "src/{{cookiecutter.project_slug}}/models/text"
+touch "src/{{cookiecutter.project_slug}}/models/text/bert.py"
+
+# Create services module
+create_dir_with_init "src/{{cookiecutter.project_slug}}/services"
+
+# Create HPT service
+create_dir_with_init "src/{{cookiecutter.project_slug}}/services/hpt"
+touch "src/{{cookiecutter.project_slug}}/services/hpt/optimizer.py"
+touch "src/{{cookiecutter.project_slug}}/services/hpt/sampler.py"
+touch "src/{{cookiecutter.project_slug}}/services/hpt/pruner.py"
+
+# Create interpretability service
+create_dir_with_init "src/{{cookiecutter.project_slug}}/services/interpretability"
+touch "src/{{cookiecutter.project_slug}}/services/interpretability/explainer.py"
+touch "src/{{cookiecutter.project_slug}}/services/interpretability/visualizer.py"
+touch "src/{{cookiecutter.project_slug}}/services/interpretability/metrics.py"
+
+# Create data module
+create_dir_with_init "src/{{cookiecutter.project_slug}}/data"
+
+# Create datasets
+create_dir_with_init "src/{{cookiecutter.project_slug}}/data/datasets"
+touch "src/{{cookiecutter.project_slug}}/data/datasets/image_dataset.py"
+touch "src/{{cookiecutter.project_slug}}/data/datasets/text_dataset.py"
+
+# Create preprocessing
+create_dir_with_init "src/{{cookiecutter.project_slug}}/data/preprocessing"
+touch "src/{{cookiecutter.project_slug}}/data/preprocessing/image_processor.py"
+touch "src/{{cookiecutter.project_slug}}/data/preprocessing/text_processor.py"
+
+# Create loaders
+create_dir_with_init "src/{{cookiecutter.project_slug}}/data/loaders"
+touch "src/{{cookiecutter.project_slug}}/data/loaders/data_loader.py"
+
+# Create training module
+create_dir_with_init "src/{{cookiecutter.project_slug}}/training"
+touch "src/{{cookiecutter.project_slug}}/training/trainer.py"
+touch "src/{{cookiecutter.project_slug}}/training/metrics.py"
+
+# Create evaluation module
+create_dir_with_init "src/{{cookiecutter.project_slug}}/evaluation"
+touch "src/{{cookiecutter.project_slug}}/evaluation/evaluator.py"
+touch "src/{{cookiecutter.project_slug}}/evaluation/metrics.py"
+
+# Create utils module
+create_dir_with_init "src/{{cookiecutter.project_slug}}/utils"
+touch "src/{{cookiecutter.project_slug}}/utils/logger.py"
+touch "src/{{cookiecutter.project_slug}}/utils/visualization.py"
+touch "src/{{cookiecutter.project_slug}}/utils/helpers.py"
+
+# Create tests structure
+create_dir_with_init "tests"
+touch "tests/conftest.py"
+create_dir_with_init "tests/test_models"
+create_dir_with_init "tests/test_services"
+create_dir_with_init "tests/test_services/test_hpt"
+create_dir_with_init "tests/test_services/test_interpretability"
+create_dir_with_init "tests/test_training"
+
+echo "Template structure created successfully!"
