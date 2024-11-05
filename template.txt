@@ -1,0 +1,85 @@
+cookiecutter-hpt-interpretability/
+├── cookiecutter.json
+├── hooks/
+│   ├── __init__.py
+│   ├── pre_gen_project.py      # Validate project inputs
+│   └── post_gen_project.py     # Setup project after generation
+└── {{cookiecutter.project_slug}}/
+    ├── README.md
+    ├── setup.py
+    ├── requirements.txt
+    ├── start.sh                # Automation script
+    ├── config/
+    │   ├── __init__.py
+    │   ├── config.yml          # Main configuration
+    │   ├── hpt_config.yml      # HPT specific settings
+    │   └── model_config/
+    │       ├── __init__.py
+    │       ├── vgg16.yml
+    │       └── bert.yml
+    ├── src/
+    │   └── {{cookiecutter.project_slug}}/
+    │       ├── __init__.py
+    │       ├── cli.py          # Command line interface
+    │       ├── main.py         # Entry point
+    │       ├── router.py       # Service router
+    │       ├── constants.py
+    │       ├── core/
+    │       │   ├── __init__.py
+    │       │   ├── base_model.py
+    │       │   ├── base_trainer.py
+    │       │   └── base_optimizer.py
+    │       ├── models/
+    │       │   ├── __init__.py
+    │       │   ├── vision/
+    │       │   │   ├── __init__.py
+    │       │   │   └── vgg.py
+    │       │   └── text/
+    │       │       ├── __init__.py
+    │       │       └── bert.py
+    │       ├── services/
+    │       │   ├── __init__.py
+    │       │   ├── hpt/
+    │       │   │   ├── __init__.py
+    │       │   │   ├── optimizer.py
+    │       │   │   ├── sampler.py
+    │       │   │   └── pruner.py
+    │       │   └── interpretability/
+    │       │       ├── __init__.py
+    │       │       ├── explainer.py
+    │       │       ├── visualizer.py
+    │       │       └── metrics.py
+    │       ├── data/
+    │       │   ├── __init__.py
+    │       │   ├── datasets/
+    │       │   │   ├── __init__.py
+    │       │   │   ├── image_dataset.py
+    │       │   │   └── text_dataset.py
+    │       │   ├── preprocessing/
+    │       │   │   ├── __init__.py
+    │       │   │   ├── image_processor.py
+    │       │   │   └── text_processor.py
+    │       │   └── loaders/
+    │       │       ├── __init__.py
+    │       │       └── data_loader.py
+    │       ├── training/
+    │       │   ├── __init__.py
+    │       │   ├── trainer.py
+    │       │   └── metrics.py
+    │       ├── evaluation/
+    │       │   ├── __init__.py
+    │       │   ├── evaluator.py
+    │       │   └── metrics.py
+    │       └── utils/
+    │           ├── __init__.py
+    │           ├── logger.py
+    │           ├── visualization.py
+    │           └── helpers.py
+    └── tests/
+        ├── __init__.py
+        ├── conftest.py
+        ├── test_models/
+        ├── test_services/
+        │   ├── test_hpt/
+        │   └── test_interpretability/
+        └── test_training/
