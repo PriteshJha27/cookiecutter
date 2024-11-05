@@ -1,1 +1,52 @@
+#!/bin/bash
 
+# Check if cookiecutter is installed
+if ! command -v cookiecutter &> /dev/null; then
+    echo "Installing cookiecutter..."
+    pip install cookiecutter
+fi
+
+# Function to validate project name
+validate_project_name() {
+    if [[ ! $1 =~ ^[a-zA-Z][a-zA-Z0-9_-]*$ ]]; then
+        echo "Error: Project name must start with a letter and contain only letters, numbers, underscores, or hyphens"
+        exit 1
+    fi
+}
+
+# Get project name from user
+read -p "Enter project name: " project_name
+validate_project_name "$project_name"
+
+# Create project using cookiecutter
+echo "Creating project structure..."
+cookiecutter gh:your-username/cookiecutter-hpt-interpretability \
+    project_name="$project_name" \
+    --no-input
+
+# Navigate to project directory
+project_slug=$(echo "$project_name" | tr '[:upper:]' '[:lower:]' | tr ' -' '_')
+cd "$project_slug"
+
+# Create virtual environment
+echo "Creating virtual environment..."
+python -m venv venv
+source venv/bin/activate  # For Unix/MacOS
+# .\venv\Scripts\activate  # For Windows
+
+# Install requirements
+echo "Installing requirements..."
+pip install -r requirements.txt
+
+# Initialize git repository
+echo "Initializing git repository..."
+git init
+git add .
+git commit -m "Initial commit"
+
+echo "Project setup complete! Your new project is ready at: $(pwd)"
+echo "To get started:"
+echo "1. cd $project_slug"
+echo "2. source venv/bin/activate  # For Unix/MacOS"
+echo "3. Configure your settings in config/*.yml files"
+echo "4. Run python src/$project_slug/main.py"
