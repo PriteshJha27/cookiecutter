@@ -1,16 +1,68 @@
-@click.group()
-def cli():
-    """CLI for HPT and Model Interpretability"""
-    pass
+import torch
+from torch.utils.data import DataLoader
+import dask.array as da
+from ..preprocessing.image_processor import ImagePreprocessor
+from ...utils.logger import get_logger
 
-@cli.command()
-@click.option('--model-type', type=click.Choice(['vision', 'text']), prompt='Select model type')
-def select_model(model_type):
-    """Select model type and specific model"""
-    if model_type == 'vision':
-        model = click.prompt('Select vision model', type=click.Choice(['vgg16']))
-        if model == 'vgg16':
-            click.echo("VGG16 selected. You can now run HPT using: python -m src.cli run-hpt --model vgg16")
-    else:  # text
-        click.echo("Text models not implemented yet. Exiting...")
-        sys.exit(0)
+logger = get_logger(__name__)
+
+class DataManager:
+    def __init__(self, config):
+        self.config = config
+        self.preprocessor = ImagePreprocessor(config)
+        
+    def create_data_loaders(self, processed_img, labels):
+        """Create train, validation and test dataloaders"""
+        total_len = len(labels)
+        
+        # Calculate split sizes
+        train_size = int(total_len * self.config['data']['splits']['train'])
+        val_size = int(total_len * self.config['data']['splits']['val'])
+        
+        # Split indices
+        indices = list(range(total_len))
+        train_indices = indices[:train_size]
+        val_indices = indices[train_size:train_size + val_size]
+        test_indices = indices[train_size + val_size:]
+        
+        # Create datasets
+        from ..datasets.image_dataset import CustomImageDataset
+        
+        train_dataset = CustomImageDataset(
+            processed_img[train_indices], 
+            [labels[i] for i in train_indices]
+        )
+        
+        val_dataset = CustomImageDataset(
+            processed_img[val_indices], 
+            [labels[i] for i in val_indices]
+        )
+        
+        test_dataset = CustomImageDataset(
+            processed_img[test_indices], 
+            [labels[i] for i in test_indices]
+        )
+        
+        # Create dataloaders
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=self.config['data']['batch_size'],
+            shuffle=True
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.config['data']['batch_size'],
+            shuffle=False
+        )
+        
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=self.config['data']['batch_size'],
+            shuffle=False
+        )
+        
+        logger.info(f"Created dataloaders - Train: {len(train_loader.dataset)}, "
+                   f"Val: {len(val_loader.dataset)}, Test: {len(test_loader.dataset)}")
+        
+        return train_loader, val_loader, test_loader
