@@ -1,68 +1,45 @@
-import torch
-from torch.utils.data import DataLoader
-import dask.array as da
-from ..preprocessing.image_processor import ImagePreprocessor
-from ...utils.logger import get_logger
+import click
+from pathlib import Path
+from .router import Router
+from .utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-class DataManager:
-    def __init__(self, config):
-        self.config = config
-        self.preprocessor = ImagePreprocessor(config)
-        
-    def create_data_loaders(self, processed_img, labels):
-        """Create train, validation and test dataloaders"""
-        total_len = len(labels)
-        
-        # Calculate split sizes
-        train_size = int(total_len * self.config['data']['splits']['train'])
-        val_size = int(total_len * self.config['data']['splits']['val'])
-        
-        # Split indices
-        indices = list(range(total_len))
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:train_size + val_size]
-        test_indices = indices[train_size + val_size:]
-        
-        # Create datasets
-        from ..datasets.image_dataset import CustomImageDataset
-        
-        train_dataset = CustomImageDataset(
-            processed_img[train_indices], 
-            [labels[i] for i in train_indices]
-        )
-        
-        val_dataset = CustomImageDataset(
-            processed_img[val_indices], 
-            [labels[i] for i in val_indices]
-        )
-        
-        test_dataset = CustomImageDataset(
-            processed_img[test_indices], 
-            [labels[i] for i in test_indices]
-        )
-        
-        # Create dataloaders
-        train_loader = DataLoader(
-            train_dataset, 
-            batch_size=self.config['data']['batch_size'],
-            shuffle=True
-        )
-        
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config['data']['batch_size'],
-            shuffle=False
-        )
-        
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=self.config['data']['batch_size'],
-            shuffle=False
-        )
-        
-        logger.info(f"Created dataloaders - Train: {len(train_loader.dataset)}, "
-                   f"Val: {len(val_loader.dataset)}, Test: {len(test_loader.dataset)}")
-        
-        return train_loader, val_loader, test_loader
+@click.group()
+def cli():
+    """CLI for HPT and Model Interpretability"""
+    pass
+
+@cli.command()
+@click.option('--mode', type=click.Choice(['train', 'hpt']), 
+              required=True, help='Mode of operation')
+@click.option('--model', type=click.Choice(['vgg16', 'bert']), 
+              required=True, help='Model to run')
+def run(mode: str, model: str):
+    """Run training or HPT for selected model"""
+    try:
+        # Verify config exists
+        config_path = f"config/model_config/{model}.yml"
+        if not Path(config_path).exists():
+            click.echo(f"Error: Config not found for model: {model}")
+            return
+
+        # Initialize router
+        router = Router(config_path=config_path)
+
+        # Run selected mode
+        if mode == 'hpt':
+            logger.info(f"Starting HPT for {model}")
+            study, best_model = router.run_hpt()
+            click.echo(f"\nBest hyperparameters: {study.best_params}")
+            click.echo(f"Best value: {study.best_value}")
+        else:
+            logger.info(f"Starting training for {model}")
+            router.train()  # You'll need to implement this
+
+    except Exception as e:
+        logger.error(f"Error running {mode} for {model}: {str(e)}")
+        click.echo(f"Operation failed. Check logs for details.")
+
+if __name__ == '__main__':
+    cli()
