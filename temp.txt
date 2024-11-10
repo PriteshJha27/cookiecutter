@@ -1,173 +1,118 @@
-
 import os
+from typing import Any, List, Mapping, Optional, Dict
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
+from langchain_core.language_models.llms import LLM
+from langchain_core.pydantic_v1 import Field, root_validator
+import httpx
 from dotenv import load_dotenv
-load_dotenv()
-
-api_key = os.getenv("openai_api_key")
-from typing import Any, List, Mapping, Optional, Dict
-from langchain_core.callbacks.manager import CallbackManagerForLLMRun
-from langchain_core.language_models.llms import LLM
-from langchain_core.pydantic_v1 import Field, root_validator
-import requests
-
-
-# Use it in a simple chain
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-from langchain_core.output_parsers import StrOutputParser
-
-class CustomOpenAILLM(LLM):
-    """Custom LLM wrapper for OpenAI-compatible API."""
-    
-    # Model configuration
-    api_url: str = Field(..., description="URL for the API endpoint")
-    api_key: Optional[str] = Field(None, description="API key if required")
-    model_kwargs: Dict = Field(default_factory=dict, description="Additional parameters to pass to the model")
-    
-    @root_validator()
-    def validate_environment(cls, values: Dict) -> Dict:
-        """Validate that api_url exists."""
-        api_url = values.get("api_url")
-        if not api_url:
-            raise ValueError("api_url must be provided")
-        return values
-
-    @property
-    def _llm_type(self) -> str:
-        """Return type of LLM."""
-        return "custom_openai"
-
-    def _prepare_request_payload(self, prompt: str) -> Dict:
-        """Prepare the payload for the API request."""
-        payload = {
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            **self.model_kwargs
-        }
-        return payload
-
-    def _prepare_headers(self) -> Dict:
-        """Prepare headers for the API request."""
-        headers = {
-            "Content-Type": "application/json"
-        }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
-
-    def _call(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> str:
-        """Execute the API call to the custom endpoint.
-
-        Args:
-            prompt: The prompt to send to the model.
-            stop: A list of strings to stop generation when encountered.
-            run_manager: A callback manager for monitoring the execution.
-            **kwargs: Additional keyword arguments.
-
-        Returns:
-            The generated text response.
-
-        Raises:
-            ValueError: If the API call fails.
-        """
-        headers = self._prepare_headers()
-        payload = self._prepare_request_payload(prompt)
-        
-        try:
-            response = requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            response.raise_for_status()
-            
-            # Parse the response - adjust this based on your API's response format
-            response_data = response.json()
-            
-            # Assuming the response format is similar to OpenAI's
-            # Modify this based on your actual API response structure
-            if "choices" in response_data:
-                return response_data["choices"][0]["message"]["content"]
-            else:
-                return response_data.get("response", "")
-            
-        except requests.exceptions.RequestException as e:
-            raise ValueError(f"API call failed: {str(e)}")
-
-    @property
-    def _identifying_params(self) -> Mapping[str, Any]:
-        """Get the identifying parameters."""
-        return {
-            "api_url": self.api_url,
-            "model_kwargs": self.model_kwargs
-        }
-llm = CustomOpenAILLM(
-    api_url="https://api.openai.com/v1/chat/completions",
-    api_key=api_key,
-    model_kwargs={
-        "model": "gpt-4o-mini",  # or your specific model name
-        "temperature": 0.7,
-        "max_tokens": 1000
-    }
-)
-prompt = PromptTemplate.from_template("Tell me a joke about {topic}")
-chain = prompt | llm | StrOutputParser()
-result = chain.invoke({"topic": "programming"})
-result
-from typing import Any, List, Mapping, Optional, Dict
-from langchain_core.callbacks.manager import CallbackManagerForLLMRun
-from langchain_core.language_models.llms import LLM
-from langchain_core.pydantic_v1 import Field, root_validator
-import requests
 
 class LlamaLLM(LLM):
-    """Custom LLM wrapper for Llama API."""
+    """Custom LLM wrapper for Llama API with authentication."""
     
-    api_url: str = Field(..., description="URL for the Llama API endpoint")
-    api_key: Optional[str] = Field(None, description="API key if required")
-    max_tokens: int = Field(default=1000, description="Maximum number of tokens to generate")
-    temperature: float = Field(default=0.7, description="Sampling temperature")
-    top_p: float = Field(default=0.95, description="Top-p sampling parameter")
+    auth_url: str = Field(
+        default="https://authbluesvega-vip.php.aesp.com/sso/signin",
+        description="Authentication endpoint URL"
+    )
+    llama_url: str = Field(
+        default="https://aidageniservices.qa.aesp.com/app/v1/opensource/models/llama3-7b-instruct/chat/completions",
+        description="Llama API endpoint URL"
+    )
+    cert_path: str = Field(
+        default="path/to/your/cert.pem",
+        description="Path to certificate file"
+    )
+    user_id: str = Field(..., description="User ID for authentication")
+    pwd: str = Field(..., description="Password for authentication")
     
     @root_validator()
     def validate_environment(cls, values: Dict) -> Dict:
-        """Validate that api_url exists."""
-        api_url = values.get("api_url")
-        if not api_url:
-            raise ValueError("api_url must be provided")
+        """Validate that required fields are present."""
+        required_fields = ['auth_url', 'llama_url', 'user_id', 'pwd']
+        for field in required_fields:
+            if not values.get(field):
+                raise ValueError(f"{field} must be provided")
         return values
 
     @property
     def _llm_type(self) -> str:
         """Return type of LLM."""
-        return "llama"
+        return "llama_authenticated"
 
-    def _prepare_request_payload(self, prompt: str) -> Dict:
-        """Prepare the payload for the Llama API request."""
-        return {
-            "prompt": prompt,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "stream": False  # Set to True if you want to implement streaming
+    async def _get_auth_cookie(self) -> str:
+        """Get authentication cookie."""
+        auth_payload = {
+            "userId": self.user_id,
+            "pwd": self.pwd
         }
+        
+        auth_headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "*/*"
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                self.auth_url,
+                data=auth_payload,
+                headers=auth_headers
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"Authentication failed: ({response.status_code}) {response.text}")
+            
+            auth_cookie = response.headers.get("Set-Cookie")
+            if not auth_cookie:
+                raise Exception("No cookie header found")
+                
+            return auth_cookie
 
-    def _prepare_headers(self) -> Dict:
-        """Prepare headers for the API request."""
-        headers = {
-            "Content-Type": "application/json"
+    async def _llama_call(self, system_prompt: str, query: str) -> str:
+        """Make authenticated call to Llama API."""
+        auth_cookie = await self._get_auth_cookie()
+        
+        llama_payload = {
+            "messages": [
+                {
+                    "content": system_prompt,
+                    "role": "system"
+                },
+                {
+                    "content": query,
+                    "role": "user"
+                }
+            ],
+            "model": "llama3-7b-instruct"
         }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
+        
+        llama_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": auth_cookie
+        }
+        
+        async with httpx.AsyncClient(verify=self.cert_path, timeout=60.0) as client:
+            llama_response = await client.post(
+                self.llama_url,
+                json=llama_payload,
+                headers=llama_headers
+            )
+            
+            if llama_response.status_code != 200:
+                raise Exception(f"Llama call failed: ({llama_response.status_code}) {llama_response.text}")
+            
+            return llama_response.json()
+
+    async def _acall(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Async call to the Llama API."""
+        system_prompt = kwargs.get('system_prompt', "You are a helpful AI assistant.")
+        output = await self._llama_call(system_prompt, prompt)
+        return output.get("choices", [{}])[0].get("message", {}).get("content", "")
 
     def _call(
         self,
@@ -176,43 +121,24 @@ class LlamaLLM(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        """Execute the API call to the Llama endpoint."""
-        headers = self._prepare_headers()
-        payload = self._prepare_request_payload(prompt)
+        """Synchronous call to the Llama API using asyncio."""
+        import asyncio
         
+        # Create event loop if it doesn't exist
         try:
-            response = requests.post(
-                self.api_url,
-                headers=headers,
-                json=payload,
-                timeout=30
-            )
-            response.raise_for_status()
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             
-            # Parse the Llama API response
-            # Modify this based on your actual API response structure
-            response_data = response.json()
-            
-            # Assuming the response has a 'generated_text' or similar field
-            # Adjust this based on your actual API response structure
-            if "generated_text" in response_data:
-                return response_data["generated_text"]
-            elif "response" in response_data:
-                return response_data["response"]
-            elif "output" in response_data:
-                return response_data["output"]
-            else:
-                raise ValueError(f"Unexpected response format: {response_data}")
-            
-        except requests.exceptions.RequestException as e:
-            raise ValueError(f"API call failed: {str(e)}")
+        return loop.run_until_complete(
+            self._acall(prompt, stop, run_manager, **kwargs)
+        )
 
     @property
     def _identifying_params(self) -> Mapping[str, Any]:
         """Get the identifying parameters."""
         return {
-            "api_url": self.api_url,
-            "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p
+            "llama_url": self.llama_url,
+            "model": "llama3-7b-instruct"
         }
