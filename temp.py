@@ -32,29 +32,34 @@ class ChatAmexLlamaWithTools(ChatAmexLlama):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.tools: List[BaseTool] = []
+        self._tools: List[BaseTool] = []
         self._tool_descriptions: Optional[str] = None
         self._tool_names: Optional[str] = None
+    
+    @property
+    def tools(self) -> List[BaseTool]:
+        """Get the list of bound tools."""
+        return self._tools
     
     def bind_tools(self, tools: Sequence[BaseTool]) -> 'ChatAmexLlamaWithTools':
         """
         Bind tools to the LLM and prepare tool descriptions for agent use.
         Returns a new instance with bound tools.
         """
-        self.tools = list(tools)
+        self._tools = list(tools)
         
         # Prepare tool descriptions and names
         self._tool_descriptions = "\n".join(
             f"- {tool.name}: {tool.description}" 
-            for tool in self.tools
+            for tool in self._tools
         )
-        self._tool_names = ", ".join(tool.name for tool in self.tools)
+        self._tool_names = ", ".join(tool.name for tool in self._tools)
         
         return self
     
     def get_tool_prompt_variables(self) -> Dict[str, str]:
         """Get the tool-related variables needed for the prompt template."""
-        if not self.tools:
+        if not self._tools:
             return {"tools": "", "tool_names": ""}
         return {
             "tools": self._tool_descriptions,
@@ -72,7 +77,7 @@ class ChatAmexLlamaWithTools(ChatAmexLlama):
         response = await super()._acall(prompt, stop, run_manager, **kwargs)
         
         # Handle tool execution if tools are bound
-        if self.tools:
+        if self._tools:
             try:
                 # Look for tool calls in the format specified in the prompt
                 if "Action:" in response and "Action Input:" in response:
@@ -84,7 +89,7 @@ class ChatAmexLlamaWithTools(ChatAmexLlama):
                     tool_input = input_line.replace('Action Input:', '').strip()
                     
                     # Find and execute the appropriate tool
-                    for tool in self.tools:
+                    for tool in self._tools:
                         if tool.name == tool_name:
                             return await tool.arun(tool_input)
             except Exception as e:
