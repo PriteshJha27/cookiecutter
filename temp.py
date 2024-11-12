@@ -1,118 +1,87 @@
-from typing import List, Dict, Any
-from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-from langchain_core.output_parsers import StrOutputParser, CommaSeparatedListOutputParser
-from langchain_core.runnables import RunnableParallel, RunnablePassthrough
-from chat_amex_llama import ChatAmexLlama  # Your custom LLM
+from typing import Any, List, Mapping, Optional, Dict, AsyncGenerator
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models import LLM
+from langchain_core.pydantic_v1 import Field, root_validator
+import httpx
+import os
+import json
+from datetime import datetime, timedelta
 import asyncio
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+class ChatAmexLlama(LLM):
+    """Enhanced LLM wrapper for Llama API with improved auth and streaming."""
+    
+    # ... [previous attributes remain the same] ...
 
-# Example 1: Basic LCEL Chain
-def create_basic_chain():
-    """Create a basic LCEL chain for simple text transformation."""
-    
-    # Initialize your custom LLM
-    llm = ChatAmexLlama()
-    
-    # Create a prompt template
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessagePromptTemplate.from_template(
-            "You are a helpful assistant that transforms text to {style} style."
-        ),
-        HumanMessagePromptTemplate.from_template("{input_text}")
-    ])
-    
-    # Create the chain
-    chain = prompt | llm | StrOutputParser()
-    
-    return chain
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """
+        Synchronous call to the LLM.
+        
+        Args:
+            prompt: The input prompt
+            stop: Optional stop sequences
+            run_manager: Optional callback manager
+            **kwargs: Additional arguments
+            
+        Returns:
+            Generated text
+        """
+        # Use asyncio to run the async call in a sync context
+        return asyncio.run(self._acall(prompt, stop, run_manager, **kwargs))
 
-# Example 2: Parallel Processing Chain
-def create_parallel_chain():
-    """Create a chain that processes input in parallel branches."""
-    
-    llm = ChatAmexLlama()
-    
-    # Create different prompts for each branch
-    summary_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Create a brief summary of the following text."),
-        ("human", "{input_text}")
-    ])
-    
-    keywords_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Extract key topics from the text as a comma-separated list."),
-        ("human", "{input_text}")
-    ])
-    
-    # Create parallel branches
-    chain = RunnableParallel(
-        summary=summary_prompt | llm | StrOutputParser(),
-        keywords=keywords_prompt | llm | CommaSeparatedListOutputParser()
-    )
-    
-    return chain
+    async def _acall(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """
+        Async call to generate complete response.
+        """
+        auth_token = await self._get_auth_token()
+        await self._init_client()
 
-# Example 3: Sequential Chain with Memory
-def create_sequential_chain():
-    """Create a chain that processes input sequentially with context."""
-    
-    llm = ChatAmexLlama()
-    
-    # Create prompts for each step
-    analysis_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Analyze the following text and identify main points."),
-        ("human", "{input_text}")
-    ])
-    
-    conclusion_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Based on the analysis, provide key conclusions."),
-        ("human", "Analysis: {analysis}\nProvide conclusions:")
-    ])
-    
-    # Create the sequential chain
-    chain = (
-        RunnableParallel({
-            "analysis": analysis_prompt | llm | StrOutputParser(),
-            "input_text": RunnablePassthrough()
-        })
-        | conclusion_prompt 
-        | llm 
-        | StrOutputParser()
-    )
-    
-    return chain
+        payload = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful AI assistant."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "model": self.model_name,
+            "stream": False  # Set to False for non-streaming response
+        }
 
-# Example usage
-async def main():
-    # Test basic chain
-    basic_chain = create_basic_chain()
-    result1 = await basic_chain.ainvoke({
-        "style": "professional",
-        "input_text": "Hey there! How's it going?"
-    })
-    print("Basic Chain Result:", result1)
-    
-    # Test parallel chain
-    parallel_chain = create_parallel_chain()
-    result2 = await parallel_chain.ainvoke({
-        "input_text": "Artificial Intelligence is transforming various industries. "
-                     "Machine learning models are becoming more sophisticated, "
-                     "while neural networks continue to advance."
-    })
-    print("\nParallel Chain Result:")
-    print("Summary:", result2["summary"])
-    print("Keywords:", result2["keywords"])
-    
-    # Test sequential chain
-    sequential_chain = create_sequential_chain()
-    result3 = await sequential_chain.ainvoke({
-        "input_text": "The global climate is changing rapidly. "
-                     "Temperatures are rising, and extreme weather events "
-                     "are becoming more frequent."
-    })
-    print("\nSequential Chain Result:", result3)
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": auth_token
+        }
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        response = await self._http_client.post(
+            self.llama_uri,
+            json=payload,
+            headers=headers
+        )
+
+        if response.status_code != 200:
+            raise Exception(f"Llama API call failed: {response.status_code} {response.text}")
+
+        try:
+            response_data = response.json()
+            return response_data['choices'][0]['message']['content']
+        except Exception as e:
+            raise Exception(f"Error parsing response: {str(e)}")
+
+    # ... [rest of the previous methods remain the same] ...
