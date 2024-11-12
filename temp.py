@@ -7,7 +7,6 @@ from langchain.agents import AgentExecutor, create_react_agent
 from langchain.agents.format_scratchpad import format_log_to_str
 from langchain.tools import DuckDuckGoSearchTool
 
-# Custom prompt template for the React agent
 REACT_CUSTOM_TEMPLATE = """Answer the following questions as best you can. You have access to the following tools:
 
 {tools}
@@ -29,12 +28,38 @@ Question: {input}
 {scratchpad}"""
 
 class ChatAmexLlamaWithTools(ChatAmexLlama):
-    tools: List[BaseTool] = []
+    """Enhanced ChatAmexLlama with proper tool binding and agent support."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tools: List[BaseTool] = []
+        self._tool_descriptions: Optional[str] = None
+        self._tool_names: Optional[str] = None
     
     def bind_tools(self, tools: Sequence[BaseTool]) -> 'ChatAmexLlamaWithTools':
-        """Bind tools to the LLM for agent use."""
+        """
+        Bind tools to the LLM and prepare tool descriptions for agent use.
+        Returns a new instance with bound tools.
+        """
         self.tools = list(tools)
+        
+        # Prepare tool descriptions and names
+        self._tool_descriptions = "\n".join(
+            f"- {tool.name}: {tool.description}" 
+            for tool in self.tools
+        )
+        self._tool_names = ", ".join(tool.name for tool in self.tools)
+        
         return self
+    
+    def get_tool_prompt_variables(self) -> Dict[str, str]:
+        """Get the tool-related variables needed for the prompt template."""
+        if not self.tools:
+            return {"tools": "", "tool_names": ""}
+        return {
+            "tools": self._tool_descriptions,
+            "tool_names": self._tool_names
+        }
     
     async def _acall(
         self,
@@ -43,25 +68,29 @@ class ChatAmexLlamaWithTools(ChatAmexLlama):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        """Enhanced _acall to handle tool descriptions and function calling."""
+        """Enhanced _acall with tool handling."""
+        response = await super()._acall(prompt, stop, run_manager, **kwargs)
+        
+        # Handle tool execution if tools are bound
         if self.tools:
-            response = await super()._acall(prompt, stop, run_manager, **kwargs)
-            
-            # Parse potential tool calls from response
             try:
-                import json
-                tool_call = json.loads(response)
-                if "tool" in tool_call and "input" in tool_call:
+                # Look for tool calls in the format specified in the prompt
+                if "Action:" in response and "Action Input:" in response:
+                    # Extract action and input
+                    action_line = [line for line in response.split('\n') if line.startswith('Action:')][0]
+                    input_line = [line for line in response.split('\n') if line.startswith('Action Input:')][0]
+                    
+                    tool_name = action_line.replace('Action:', '').strip()
+                    tool_input = input_line.replace('Action Input:', '').strip()
+                    
                     # Find and execute the appropriate tool
                     for tool in self.tools:
-                        if tool.name == tool_call["tool"]:
-                            return await tool.arun(tool_call["input"])
-            except:
-                pass
-            
-            return response
-        else:
-            return await super()._acall(prompt, stop, run_manager, **kwargs)
+                        if tool.name == tool_name:
+                            return await tool.arun(tool_input)
+            except Exception as e:
+                print(f"Tool execution error: {e}")
+                
+        return response
     
     def _call(
         self,
@@ -70,34 +99,33 @@ class ChatAmexLlamaWithTools(ChatAmexLlama):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        """Synchronous version of _acall with tool support."""
+        """Synchronous version of _acall."""
         import asyncio
         return asyncio.run(self._acall(prompt, stop, run_manager, **kwargs))
 
-# Function to create and setup the agent
-def setup_react_agent(llm: ChatAmexLlamaWithTools, tools: List[BaseTool]):
+def create_amex_agent(llm: ChatAmexLlamaWithTools, tools: List[BaseTool], verbose: bool = True):
     """
-    Setup a REACT agent with the custom LLM and tools
+    Create an agent using the ChatAmexLlamaWithTools LLM.
     """
-    # Create prompt template
+    # Bind tools to the LLM
+    llm_with_tools = llm.bind_tools(tools)
+    
+    # Create prompt template with tool variables
     prompt = PromptTemplate(
         template=REACT_CUSTOM_TEMPLATE,
         input_variables=["input", "scratchpad", "tools", "tool_names"]
     )
     
-    # Bind tools to LLM
-    llm_with_tools = llm.bind_tools(tools)
-    
-    # Create the agent
+    # Create the agent with bound tools
     agent = create_react_agent(
         llm=llm_with_tools,
         tools=tools,
         prompt=prompt
     )
     
-    # Create the agent executor
+    # Create and return the agent executor
     return AgentExecutor(
         agent=agent,
         tools=tools,
-        verbose=True
+        verbose=verbose
     )
