@@ -5,8 +5,6 @@ from langchain_core.outputs import Generation, LLMResult
 import httpx
 from pydantic import BaseModel, ConfigDict
 import os
-import ssl
-import certifi
 
 class ChatAmexLlama(BaseLLM, BaseModel):
     """Base LLM wrapper for Llama API."""
@@ -17,7 +15,6 @@ class ChatAmexLlama(BaseLLM, BaseModel):
     pwd: str
     cert_path: str
     model_name: str = "llama3-70b-instruct"
-    verify_ssl: bool = True  # Added option to control SSL verification
     
     _auth_token: Optional[str] = None
     _client: Optional[httpx.Client] = None
@@ -26,28 +23,13 @@ class ChatAmexLlama(BaseLLM, BaseModel):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        # Print URLs for debugging
+        print(f"Auth URL: {self.auth_url}")
+        print(f"Base URL: {self.base_url}")
         
-        # Create SSL context
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        if not self.verify_ssl:
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-        
-        # If cert_path is provided, load the certificate
-        if self.cert_path:
-            try:
-                ssl_context.load_verify_locations(self.cert_path)
-            except Exception as e:
-                print(f"Warning: Failed to load certificate from {self.cert_path}: {str(e)}")
-                # Fallback to no verification if certificate loading fails
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-
-        # Initialize HTTP client
         self._client = httpx.Client(
-            verify=False,  # We'll handle verification through our SSL context
-            timeout=30.0,
-            http2=True
+            verify=False,  # Disable SSL verification
+            timeout=30.0
         )
 
     def _get_auth_token(self) -> str:
@@ -56,6 +38,8 @@ class ChatAmexLlama(BaseLLM, BaseModel):
             return self._auth_token
 
         try:
+            # Print request details
+            print("Sending auth request...")
             response = self._client.post(
                 self.auth_url,
                 data={
@@ -67,6 +51,7 @@ class ChatAmexLlama(BaseLLM, BaseModel):
                     "Accept": "*/*"
                 }
             )
+            print(f"Auth Response Status: {response.status_code}")
 
             if response.status_code != 200:
                 raise ValueError(f"Authentication failed: {response.status_code} - {response.text}")
@@ -93,42 +78,63 @@ class ChatAmexLlama(BaseLLM, BaseModel):
 
         try:
             for prompt in prompts:
+                # Construct complete URL
+                api_url = f"{self.base_url.rstrip('/')}/chat/completions"
+                print(f"Making API call to: {api_url}")  # Debug print
+                
+                # Prepare request payload
+                payload = {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a helpful AI assistant."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "model": self.model_name,
+                    "stream": False
+                }
+                
+                # Debug print payload
+                print(f"Request Payload: {payload}")
+
                 response = self._client.post(
-                    f"{self.base_url}/chat/completions",
-                    json={
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "You are a helpful AI assistant."
-                            },
-                            {
-                                "role": "user",
-                                "content": prompt
-                            }
-                        ],
-                        "model": self.model_name,
-                        "stream": False
-                    },
+                    api_url,
+                    json=payload,
                     headers={
                         "Content-Type": "application/json",
                         "Accept": "application/json",
                         "Cookie": auth_token
                     }
                 )
-
+                
+                # Debug print response
+                print(f"Response Status: {response.status_code}")
+                print(f"Response Headers: {response.headers}")
+                
                 if response.status_code != 200:
+                    print(f"Error Response Body: {response.text}")  # Debug print
                     raise ValueError(f"API call failed: {response.status_code} - {response.text}")
 
-                content = response.json()['choices'][0]['message']['content']
-                generations.append([Generation(text=content)])
+                try:
+                    response_data = response.json()
+                    content = response_data['choices'][0]['message']['content']
+                    generations.append([Generation(text=content)])
+                except Exception as e:
+                    print(f"Error parsing response: {str(e)}")
+                    print(f"Raw Response: {response.text}")
+                    raise
 
             return LLMResult(generations=generations)
 
         except Exception as e:
+            print(f"Error in _generate: {str(e)}")
             raise ValueError(f"Generation failed: {str(e)}")
 
     def __del__(self):
-        """Cleanup client on deletion."""
         if self._client:
             self._client.close()
 
