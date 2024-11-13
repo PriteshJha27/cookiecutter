@@ -1,65 +1,95 @@
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import StrOutputParser
-from langchain.tools import Tool
-from dotenv import load_dotenv
+from typing import Any, List, Optional, Dict
+from langchain_core.language_models import BaseLLM
+from langchain_core.callbacks import CallbackManagerForLLMRun
+import httpx
+from pydantic import BaseModel, ConfigDict
 import os
 
-# Load environment variables
-load_dotenv()
+class ChatAmexLlama(BaseLLM, BaseModel):
+    """Base LLM wrapper for Llama API."""
+    
+    base_url: str
+    auth_url: str
+    user_id: str
+    pwd: str
+    cert_path: Optional[str] = None
+    model_name: str = "llama3-70b-instruct"
+    
+    _auth_token: Optional[str] = None
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-def get_weather(location: str) -> str:
-    """Dummy weather tool."""
-    return f"The weather in {location} is sunny and 22°C"
+    def _get_auth_token(self) -> str:
+        """Get authentication token."""
+        if self._auth_token:
+            return self._auth_token
 
-def main():
-    # Initialize LLM
-    llm = ChatAmexLlama()
-    
-    # Create a simple prompt template
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant."),
-        ("human", "{input}")
-    ])
-    
-    # Create chain
-    chain = prompt | llm | StrOutputParser()
-    
-    # Test chain
-    try:
-        result = chain.invoke({
-            "input": "Tell me a short joke."
-        })
-        print("Basic Chain Result:", result)
-        
-        # Test with weather tool
-        tools = [
-            Tool(
-                name="WeatherInfo",
-                func=get_weather,
-                description="Get weather information for a location"
+        verify = self.cert_path if self.cert_path else True
+        with httpx.Client(verify=verify) as client:
+            response = client.post(
+                self.auth_url,
+                data={
+                    "userid": self.user_id,
+                    "pwd": self.pwd
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "*/*"
+                }
             )
-        ]
-        
-        # Create and test tool chain
-        from chat_amex_llama_with_bindtools import ChatAmexLlamaWithTools
-        
-        llm_with_tools = ChatAmexLlamaWithTools()
-        llm_with_tools.bind_tools(tools)
-        
-        tool_prompt = ChatPromptTemplate.from_messages([
-            ("system", "Use the available tools to answer the question."),
-            ("human", "{input}")
-        ])
-        
-        tool_chain = tool_prompt | llm_with_tools | StrOutputParser()
-        
-        tool_result = tool_chain.invoke({
-            "input": "What's the weather in New York?"
-        })
-        print("\nTool Chain Result:", tool_result)
-        
-    except Exception as e:
-        print(f"Error: {str(e)}")
 
-if __name__ == "__main__":
-    main()
+            if response.status_code != 200:
+                raise ValueError(f"Authentication failed: {response.status_code}")
+
+            self._auth_token = response.headers.get("Set-Cookie")
+            if not self._auth_token:
+                raise ValueError("No authentication token received")
+
+            return self._auth_token
+
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Execute the LLM call."""
+        auth_token = self._get_auth_token()
+        verify = self.cert_path if self.cert_path else True
+
+        with httpx.Client(verify=verify) as client:
+            response = client.post(
+                f"{self.base_url}/chat/completions",
+                json={
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a helpful AI assistant."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "model": self.model_name,
+                    "stream": False
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Cookie": auth_token
+                }
+            )
+
+            if response.status_code != 200:
+                raise ValueError(f"API call failed: {response.status_code}")
+
+            try:
+                return response.json()['choices'][0]['message']['content']
+            except Exception as e:
+                raise ValueError(f"Error parsing response: {str(e)}")
+
+    @property
+    def _llm_type(self) -> str:
+        return "llama_custom"
