@@ -1,75 +1,74 @@
-from typing import Any, List, Optional, Dict
-from langchain_core.callbacks import CallbackManagerForLLMRun
-from langchain_core.language_models.llms import LLM
-from langchain_core.pydantic_v1 import Field, root_validator
-import httpx
-import os
-import json
+from typing import List, Optional, Dict, Any, Sequence
+from langchain.tools import BaseTool
+from langchain_core.agents import AgentAction, AgentFinish
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.pydantic_v1 import Field
+import re
 
-class ChatAmexLlama(LLM):
-    """LLM wrapper for internal Llama API."""
-    
-    base_url: str = Field(
-        default_factory=lambda: os.getenv("LLAMA_API_URL", "http://localhost:8000")
-    )
-    auth_url: str = Field(
-        default_factory=lambda: os.getenv("LLAMA_AUTH_URL", "http://localhost:8000/auth")
-    )
-    cert_path: str = Field(
-        default_factory=lambda: os.getenv("CERT_PATH")
-    )
-    user_id: str = Field(
-        default_factory=lambda: os.getenv("LLAMA_USER_ID")
-    )
-    pwd: str = Field(
-        default_factory=lambda: os.getenv("LLAMA_PASSWORD")
-    )
-    model_name: str = Field(default="llama3-70b-instruct")
-    
-    _auth_token: Optional[str] = None
-    
-    class Config:
-        underscore_attrs_are_private = True
+class ChatAmexLlamaWithTools(ChatAmexLlama):
+    """ChatAmexLlama with tool binding capabilities."""
 
-    @root_validator()
-    def validate_environment(cls, values: Dict) -> Dict:
-        required = ["base_url", "auth_url", "user_id", "pwd"]
-        for field in required:
-            if not values.get(field):
-                raise ValueError(f"`{field}` is required")
-        return values
+    tools: List[BaseTool] = Field(default_factory=list)
+    agent_template: str = Field(default="""Answer the following questions as best you can using the provided tools.
 
-    def _get_auth_token(self) -> str:
-        """Get authentication token."""
-        if self._auth_token:
-            return self._auth_token
+Available Tools:
+{tool_descriptions}
 
-        verify = self.cert_path if self.cert_path else True
-        client = httpx.Client(verify=verify)
+Use the following format:
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
 
-        try:
-            response = client.post(
-                self.auth_url,
-                data={
-                    "userid": self.user_id,
-                    "pwd": self.pwd
-                },
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "*/*"
-                }
-            )
+Begin!
 
-            if response.status_code != 200:
-                raise ValueError(f"Authentication failed: {response.status_code} {response.text}")
+Question: {input}
+Thought: Let's solve this step by step
+{agent_scratchpad}""")
 
-            self._auth_token = response.headers.get("Set-Cookie")
-            if not self._auth_token:
-                raise ValueError("No authentication token received")
+    def bind_tools(self, tools: Sequence[BaseTool]) -> 'ChatAmexLlamaWithTools':
+        """Bind tools to the LLM."""
+        self.tools = list(tools)
+        return self
 
-            return self._auth_token
-        finally:
-            client.close()
+    def get_tool_prompts(self) -> Dict[str, Any]:
+        """Get tool-related prompt variables."""
+        tool_descriptions = "\n".join(
+            f"{tool.name}: {tool.description}" for tool in self.tools
+        )
+        tool_names = ", ".join(tool.name for tool in self.tools)
+        
+        return {
+            "tool_descriptions": tool_descriptions,
+            "tool_names": tool_names
+        }
+
+    def parse_output(self, text: str) -> Optional[Dict[str, Any]]:
+        """Parse the LLM output to extract action and input."""
+        if "Final Answer:" in text:
+            answer = text.split("Final Answer:")[-1].strip()
+            return {"type": "finish", "output": answer}
+
+        action_match = re.search(r"Action: (.*?)\nAction Input: (.*?)(?:\n|$)", text, re.DOTALL)
+        if action_match:
+            return {
+                "type": "action",
+                "action": action_match.group(1).strip(),
+                "action_input": action_match.group(2).strip()
+            }
+        
+        return None
+
+    def execute_tool(self, tool_name: str, tool_input: str) -> str:
+        """Execute a specific tool."""
+        for tool in self.tools:
+            if tool.name == tool_name:
+                return tool.run(tool_input)
+        raise ValueError(f"Tool '{tool_name}' not found")
 
     def _call(
         self,
@@ -78,47 +77,21 @@ class ChatAmexLlama(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        """Execute the LLM call."""
-        auth_token = self._get_auth_token()
-        verify = self.cert_path if self.cert_path else True
+        """Override _call to handle tool execution."""
+        response = super()._call(prompt, stop, **kwargs)
+        
+        if not self.tools:
+            return response
 
-        with httpx.Client(verify=verify) as client:
-            response = client.post(
-                f"{self.base_url}/chat/completions",
-                json={
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a helpful AI assistant."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "model": self.model_name,
-                    "stream": False
-                },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "Cookie": auth_token
-                }
-            )
-
-            if response.status_code != 200:
-                raise ValueError(f"API call failed: {response.status_code} {response.text}")
-
-            try:
-                return response.json()['choices'][0]['message']['content']
-            except Exception as e:
-                raise ValueError(f"Error parsing response: {str(e)}")
-
-    @property
-    def _llm_type(self) -> str:
-        return "llama_custom"
-
-    def get_num_tokens(self, text: str) -> int:
-        """Get the number of tokens in a text."""
-        # Implement token counting if needed
-        return len(text.split())
+        parsed = self.parse_output(response)
+        if parsed:
+            if parsed["type"] == "finish":
+                return parsed["output"]
+            elif parsed["type"] == "action":
+                try:
+                    result = self.execute_tool(parsed["action"], parsed["action_input"])
+                    return f"{response}\nObservation: {result}"
+                except Exception as e:
+                    return f"{response}\nObservation: Tool execution failed: {str(e)}"
+        
+        return response
