@@ -1,9 +1,7 @@
 from typing import List
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.tools import BaseTool
-from langchain.prompts import MessagesPlaceholder
-from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain.prompts import PromptTemplate
 from chat_amex_llama import ChatAmexLlama
 
 def create_amex_agent(
@@ -13,25 +11,37 @@ def create_amex_agent(
 ) -> AgentExecutor:
     """Create an agent using ChatAmexLlama."""
     
-    # Create the agent prompt
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content=(
-            "You are a helpful AI assistant. "
-            "Use the following tools to help answer questions:\n\n"
-            "{tools}\n\n"
-            "To use a tool, use the following format:\n"
-            "Thought: Consider what to do\n"
-            "Action: Tool name\n"
-            "Action Input: Tool input\n"
-            "Observation: Tool output\n"
-            "... (repeat if needed)\n"
-            "Thought: I know what to answer\n"
-            "Final Answer: The final answer\n"
-        )),
-        HumanMessage(content="{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad")
-    ])
-    
+    # Create the ReAct prompt template
+    template = """Answer the following questions as best you can using the provided tools.
+
+Available Tools:
+{tools}
+
+Use the following format:
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+
+Begin!
+
+Question: {input}
+{agent_scratchpad}"""
+
+    # Create prompt
+    prompt = PromptTemplate(
+        template=template,
+        input_variables=["input", "agent_scratchpad"],
+        partial_variables={
+            "tools": "\n".join([f"{tool.name}: {tool.description}" for tool in tools]),
+            "tool_names": ", ".join([tool.name for tool in tools])
+        }
+    )
+
     # Create the agent
     agent = create_react_agent(
         llm=llm,
@@ -40,11 +50,10 @@ def create_amex_agent(
     )
     
     # Create the agent executor
-    agent_executor = AgentExecutor(
+    return AgentExecutor(
         agent=agent,
         tools=tools,
         verbose=verbose,
-        handle_parsing_errors=True
+        handle_parsing_errors=True,
+        max_iterations=5
     )
-    
-    return agent_executor
