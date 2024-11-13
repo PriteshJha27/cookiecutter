@@ -1,92 +1,124 @@
-from langchain.chains import LLMChain, SimpleSequentialChain, SequentialChain
-from langchain.prompts import ChatPromptTemplate
-from langchain.prompts.chat import SystemMessage, HumanMessagePromptTemplate
-from typing import Dict
-from dotenv import load_dotenv
+from typing import Any, List, Optional, Dict
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models.llms import LLM
+from langchain_core.pydantic_v1 import Field, root_validator
+import httpx
+import os
+import json
 
-# Load environment variables
-load_dotenv()
-
-def create_basic_chain():
-    """Create a basic LLMChain."""
+class ChatAmexLlama(LLM):
+    """LLM wrapper for internal Llama API."""
     
-    # Initialize LLM
-    llm = ChatAmexLlama()
-    
-    # Create prompt template
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content="You are a helpful assistant."),
-        HumanMessagePromptTemplate.from_template("{input_text}")
-    ])
-    
-    # Create chain
-    chain = LLMChain(
-        llm=llm,
-        prompt=prompt,
-        output_key="result"
+    base_url: str = Field(
+        default_factory=lambda: os.getenv("LLAMA_API_URL", "http://localhost:8000")
     )
-    
-    return chain
-
-def create_sequential_chain():
-    """Create a sequential chain for multi-step processing."""
-    
-    llm = ChatAmexLlama()
-    
-    # First chain for analysis
-    analysis_prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content="Analyze the following text and identify key points."),
-        HumanMessagePromptTemplate.from_template("{input_text}")
-    ])
-    
-    analysis_chain = LLMChain(
-        llm=llm,
-        prompt=analysis_prompt,
-        output_key="analysis"
+    auth_url: str = Field(
+        default_factory=lambda: os.getenv("LLAMA_AUTH_URL", "http://localhost:8000/auth")
     )
-    
-    # Second chain for summary
-    summary_prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content="Summarize the following analysis."),
-        HumanMessagePromptTemplate.from_template("{analysis}")
-    ])
-    
-    summary_chain = LLMChain(
-        llm=llm,
-        prompt=summary_prompt,
-        output_key="summary"
+    cert_path: str = Field(
+        default_factory=lambda: os.getenv("CERT_PATH")
     )
-    
-    # Combine chains
-    combined_chain = SimpleSequentialChain(
-        chains=[analysis_chain, summary_chain],
-        verbose=True
+    user_id: str = Field(
+        default_factory=lambda: os.getenv("LLAMA_USER_ID")
     )
+    pwd: str = Field(
+        default_factory=lambda: os.getenv("LLAMA_PASSWORD")
+    )
+    model_name: str = Field(default="llama3-70b-instruct")
     
-    return combined_chain
+    _auth_token: Optional[str] = None
+    
+    class Config:
+        underscore_attrs_are_private = True
 
-def main():
-    """Test the chain implementations."""
-    try:
-        # Test basic chain
-        print("Testing basic chain...")
-        basic_chain = create_basic_chain()
-        result = basic_chain.run(
-            input_text="What are three key benefits of machine learning?"
-        )
-        print(f"\nBasic Chain Result: {result}")
-        
-        # Test sequential chain
-        print("\nTesting sequential chain...")
-        sequential_chain = create_sequential_chain()
-        result = sequential_chain.run(
-            "Artificial Intelligence is transforming industries through "
-            "automation, data analysis, and predictive capabilities."
-        )
-        print(f"\nSequential Chain Result: {result}")
-        
-    except Exception as e:
-        print(f"Error occurred: {str(e)}")
+    @root_validator()
+    def validate_environment(cls, values: Dict) -> Dict:
+        required = ["base_url", "auth_url", "user_id", "pwd"]
+        for field in required:
+            if not values.get(field):
+                raise ValueError(f"`{field}` is required")
+        return values
 
-if __name__ == "__main__":
-    main()
+    def _get_auth_token(self) -> str:
+        """Get authentication token."""
+        if self._auth_token:
+            return self._auth_token
+
+        verify = self.cert_path if self.cert_path else True
+        client = httpx.Client(verify=verify)
+
+        try:
+            response = client.post(
+                self.auth_url,
+                data={
+                    "userid": self.user_id,
+                    "pwd": self.pwd
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "*/*"
+                }
+            )
+
+            if response.status_code != 200:
+                raise ValueError(f"Authentication failed: {response.status_code} {response.text}")
+
+            self._auth_token = response.headers.get("Set-Cookie")
+            if not self._auth_token:
+                raise ValueError("No authentication token received")
+
+            return self._auth_token
+        finally:
+            client.close()
+
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Execute the LLM call."""
+        auth_token = self._get_auth_token()
+        verify = self.cert_path if self.cert_path else True
+
+        with httpx.Client(verify=verify) as client:
+            response = client.post(
+                f"{self.base_url}/chat/completions",
+                json={
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a helpful AI assistant."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "model": self.model_name,
+                    "stream": False
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Cookie": auth_token
+                }
+            )
+
+            if response.status_code != 200:
+                raise ValueError(f"API call failed: {response.status_code} {response.text}")
+
+            try:
+                return response.json()['choices'][0]['message']['content']
+            except Exception as e:
+                raise ValueError(f"Error parsing response: {str(e)}")
+
+    @property
+    def _llm_type(self) -> str:
+        return "llama_custom"
+
+    def get_num_tokens(self, text: str) -> int:
+        """Get the number of tokens in a text."""
+        # Implement token counting if needed
+        return len(text.split())
