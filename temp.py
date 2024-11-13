@@ -1,64 +1,97 @@
+from typing import List, Optional, Dict, Any, Sequence
+from langchain.tools import BaseTool
+from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain.tools import Tool
-from dotenv import load_dotenv
-import os
+from langchain_core.pydantic_v1 import Field
+import re
 
-# Load environment variables
-load_dotenv()
+class ChatAmexLlamaWithTools(ChatAmexLlama):
+    """ChatAmexLlama with tool binding capabilities."""
 
-def get_weather(location: str) -> str:
-    """Dummy weather tool."""
-    return f"The weather in {location} is sunny and 22°C"
+    tools: List[BaseTool] = Field(default_factory=list)
+    agent_template: str = Field(default="""Answer the following questions as best you can using the provided tools.
 
-def main():
-    # Initialize LLM
-    llm = ChatAmexLlama(
-        base_url=os.getenv("LLAMA_API_URL"),
-        auth_url=os.getenv("LLAMA_AUTH_URL"),
-        user_id=os.getenv("LLAMA_USER_ID"),
-        pwd=os.getenv("LLAMA_PASSWORD")
-    )
+Available Tools:
+{tool_descriptions}
 
-    # Basic LCEL chain
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant."),
-        ("human", "{input}")
-    ])
-    
-    chain = prompt | llm | StrOutputParser()
-    
-    # Test basic chain
-    result = chain.invoke({"input": "What is machine learning?"})
-    print("Basic Chain Result:", result)
+Use the following format:
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
 
-    # Test with tools
-    tools = [
-        Tool(
-            name="WeatherInfo",
-            func=get_weather,
-            description="Get weather information for a location"
+Begin!
+
+Question: {input}
+Thought: Let's solve this step by step
+{agent_scratchpad}""")
+
+    def bind_tools(self, tools: Sequence[BaseTool]) -> 'ChatAmexLlamaWithTools':
+        """Bind tools to the LLM."""
+        self.tools = list(tools)
+        return self
+
+    def get_tool_prompts(self) -> Dict[str, Any]:
+        """Get tool-related prompt variables."""
+        tool_descriptions = "\n".join(
+            f"{tool.name}: {tool.description}" for tool in self.tools
         )
-    ]
+        tool_names = ", ".join(tool.name for tool in self.tools)
+        
+        return {
+            "tool_descriptions": tool_descriptions,
+            "tool_names": tool_names
+        }
 
-    llm_with_tools = ChatAmexLlamaWithTools(
-        base_url=os.getenv("LLAMA_API_URL"),
-        auth_url=os.getenv("LLAMA_AUTH_URL"),
-        user_id=os.getenv("LLAMA_USER_ID"),
-        pwd=os.getenv("LLAMA_PASSWORD")
-    )
-    llm_with_tools.bind_tools(tools)
+    def parse_output(self, text: str) -> Optional[Dict[str, Any]]:
+        """Parse the LLM output to extract action and input."""
+        if "Final Answer:" in text:
+            answer = text.split("Final Answer:")[-1].strip()
+            return {"type": "finish", "output": answer}
 
-    tool_prompt = ChatPromptTemplate.from_messages([
-        ("system", "Use the available tools to answer the question."),
-        ("human", "{input}")
-    ])
-    
-    tool_chain = tool_prompt | llm_with_tools | StrOutputParser()
-    
-    # Test tool chain
-    result = tool_chain.invoke({"input": "What's the weather in New York?"})
-    print("\nTool Chain Result:", result)
+        action_match = re.search(r"Action: (.*?)\nAction Input: (.*?)(?:\n|$)", text, re.DOTALL)
+        if action_match:
+            return {
+                "type": "action",
+                "action": action_match.group(1).strip(),
+                "action_input": action_match.group(2).strip()
+            }
+        
+        return None
 
-if __name__ == "__main__":
-    main()
+    def execute_tool(self, tool_name: str, tool_input: str) -> str:
+        """Execute a specific tool."""
+        for tool in self.tools:
+            if tool.name == tool_name:
+                return tool.run(tool_input)
+        raise ValueError(f"Tool '{tool_name}' not found")
+
+    def _call(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Override _call to handle tool execution."""
+        response = super()._call(prompt, stop, **kwargs)
+        
+        if not self.tools:
+            return response
+
+        parsed = self.parse_output(response)
+        if parsed:
+            if parsed["type"] == "finish":
+                return parsed["output"]
+            elif parsed["type"] == "action":
+                try:
+                    result = self.execute_tool(parsed["action"], parsed["action_input"])
+                    return f"{response}\nObservation: {result}"
+                except Exception as e:
+                    return f"{response}\nObservation: Tool execution failed: {str(e)}"
+        
+        return response
