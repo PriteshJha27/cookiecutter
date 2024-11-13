@@ -1,95 +1,38 @@
-from typing import Any, List, Optional, Dict
-from langchain_core.language_models import BaseLLM
-from langchain_core.callbacks import CallbackManagerForLLMRun
-import httpx
-from pydantic import BaseModel, ConfigDict
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 import os
+from chat_amex_llama import ChatAmexLlama
 
-class ChatAmexLlama(BaseLLM, BaseModel):
-    """Base LLM wrapper for Llama API."""
+# Load environment variables
+load_dotenv()
+
+def test_basic_chain():
+    """Test basic LLM functionality."""
     
-    base_url: str
-    auth_url: str
-    user_id: str
-    pwd: str
-    cert_path: Optional[str] = None
-    model_name: str = "llama3-70b-instruct"
+    # Initialize LLM
+    llm = ChatAmexLlama(
+        base_url=os.getenv("LLAMA_API_URL", ""),
+        auth_url=os.getenv("LLAMA_AUTH_URL", ""),
+        user_id=os.getenv("LLAMA_USER_ID", ""),
+        pwd=os.getenv("LLAMA_PASSWORD", "")
+    )
     
-    _auth_token: Optional[str] = None
+    # Create a simple prompt
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful assistant."),
+        ("human", "{input}")
+    ])
     
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # Create chain
+    chain = prompt | llm | StrOutputParser()
+    
+    # Test
+    try:
+        result = chain.invoke({"input": "What is machine learning?"})
+        print("Success! Result:", result)
+    except Exception as e:
+        print(f"Error occurred: {str(e)}")
 
-    def _get_auth_token(self) -> str:
-        """Get authentication token."""
-        if self._auth_token:
-            return self._auth_token
-
-        verify = self.cert_path if self.cert_path else True
-        with httpx.Client(verify=verify) as client:
-            response = client.post(
-                self.auth_url,
-                data={
-                    "userid": self.user_id,
-                    "pwd": self.pwd
-                },
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "*/*"
-                }
-            )
-
-            if response.status_code != 200:
-                raise ValueError(f"Authentication failed: {response.status_code}")
-
-            self._auth_token = response.headers.get("Set-Cookie")
-            if not self._auth_token:
-                raise ValueError("No authentication token received")
-
-            return self._auth_token
-
-    def _call(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> str:
-        """Execute the LLM call."""
-        auth_token = self._get_auth_token()
-        verify = self.cert_path if self.cert_path else True
-
-        with httpx.Client(verify=verify) as client:
-            response = client.post(
-                f"{self.base_url}/chat/completions",
-                json={
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a helpful AI assistant."
-                        },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
-                    ],
-                    "model": self.model_name,
-                    "stream": False
-                },
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "Cookie": auth_token
-                }
-            )
-
-            if response.status_code != 200:
-                raise ValueError(f"API call failed: {response.status_code}")
-
-            try:
-                return response.json()['choices'][0]['message']['content']
-            except Exception as e:
-                raise ValueError(f"Error parsing response: {str(e)}")
-
-    @property
-    def _llm_type(self) -> str:
-        return "llama_custom"
+if __name__ == "__main__":
+    test_basic_chain()
