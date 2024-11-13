@@ -1,56 +1,74 @@
-from typing import List, Optional, Dict, Any
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain.tools import BaseTool
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.tools import Tool
+from dotenv import load_dotenv
 from chat_amex_llama import ChatAmexLlama
+from chat_amex_llama_agent import create_amex_agent
+import os
 
-def create_amex_agent(
-    llm: ChatAmexLlama,
-    tools: List[BaseTool],
-    verbose: bool = False
-) -> AgentExecutor:
-    """Create a ReAct agent using ChatAmexLlama."""
+# Load environment variables
+load_dotenv()
+
+def get_weather(location: str) -> str:
+    """Get weather information for a location."""
+    # Dummy implementation
+    return f"The weather in {location} is sunny with a temperature of 22°C"
+
+def search_database(query: str) -> str:
+    """Search the database for information."""
+    # Dummy implementation
+    return f"Found relevant information for: {query}"
+
+def test_agent():
+    """Test the Amex agent with tools."""
     
-    # Create the prompt template with tool descriptions
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a helpful AI assistant with access to tools. Answer the questions using the appropriate tools when needed.
-
-Available Tools:
-{tools}
-
-Use the following format:
-Question: the input question you must answer
-Thought: you should always think about what to do
-Action: the action to take, should be one of [{tool_names}]
-Action Input: the input to the action
-Observation: the result of the action
-... (this Thought/Action/Action Input/Observation can repeat N times)
-Thought: I now know the final answer
-Final Answer: the final answer to the original input question"""),
-        MessagesPlaceholder(variable_name="chat_history", optional=True),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-
-    # Format tool descriptions
-    tools_str = "\n".join(f"{tool.name}: {tool.description}" for tool in tools)
-    tool_names = ", ".join(tool.name for tool in tools)
-
-    # Create the agent
-    agent = create_react_agent(
+    # Initialize LLM
+    llm = ChatAmexLlama(
+        base_url=os.getenv("LLAMA_API_URL"),
+        auth_url=os.getenv("LLAMA_AUTH_URL"),
+        user_id=os.getenv("LLAMA_USER_ID"),
+        pwd=os.getenv("LLAMA_PASSWORD"),
+        cert_path=os.getenv("CERT_PATH")
+    )
+    
+    # Create tools
+    tools = [
+        Tool(
+            name="WeatherInfo",
+            func=get_weather,
+            description="Get current weather information for a specific location"
+        ),
+        Tool(
+            name="DatabaseSearch",
+            func=search_database,
+            description="Search the database for specific information"
+        )
+    ]
+    
+    # Create agent
+    agent_executor = create_amex_agent(
         llm=llm,
         tools=tools,
-        prompt=prompt
+        verbose=True  # Show the agent's thought process
     )
+    
+    # Test single tool
+    try:
+        print("\nTesting weather tool...")
+        result1 = agent_executor.invoke({
+            "input": "What's the weather like in New York?"
+        })
+        print("Result:", result1["output"])
+        
+        # Test multiple tools
+        print("\nTesting multiple tools...")
+        result2 = agent_executor.invoke({
+            "input": "What's the weather in London and find information about climate change?"
+        })
+        print("Result:", result2["output"])
+        
+    except Exception as e:
+        print(f"Error occurred: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
-    # Create the executor
-    agent_executor = AgentExecutor(
-        agent=agent,
-        tools=tools,
-        verbose=verbose,
-        max_iterations=5,  # Limit maximum tool usage iterations
-        early_stopping_method="generate",  # Stop if answer is found before max_iterations
-        handle_parsing_errors=True  # Gracefully handle parsing errors
-    )
-
-    return agent_executor
+if __name__ == "__main__":
+    test_agent()
