@@ -1,66 +1,56 @@
-from dotenv import load_dotenv
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-import os
-
-# First, ensure httpx is installed
-try:
-    import httpx
-except ImportError:
-    print("Installing httpx...")
-    import subprocess
-    subprocess.check_call(["pip", "install", "httpx"])
-    import httpx
-
+from typing import List, Optional, Dict, Any
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain.tools import BaseTool
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from chat_amex_llama import ChatAmexLlama
 
-# Load environment variables
-load_dotenv()
-
-def test_basic_chain():
-    """Test basic LLM functionality."""
+def create_amex_agent(
+    llm: ChatAmexLlama,
+    tools: List[BaseTool],
+    verbose: bool = False
+) -> AgentExecutor:
+    """Create a ReAct agent using ChatAmexLlama."""
     
-    # Get and verify environment variables
-    base_url = os.getenv("LLAMA_API_URL")
-    auth_url = os.getenv("LLAMA_AUTH_URL")
-    user_id = os.getenv("LLAMA_USER_ID")
-    pwd = os.getenv("LLAMA_PASSWORD")
-    cert_path = os.getenv("CERT_PATH")
-
-    print("Environment Variables:")
-    print(f"Base URL: {base_url}")
-    print(f"Auth URL: {auth_url}")
-    print(f"Cert Path: {cert_path}")
-    print(f"User ID: {user_id}")
-    print("Password: [HIDDEN]")
-
-    # Initialize LLM
-    llm = ChatAmexLlama(
-        base_url=base_url,
-        auth_url=auth_url,
-        user_id=user_id,
-        pwd=pwd,
-        cert_path=cert_path
-    )
-    
-    # Create a simple prompt
+    # Create the prompt template with tool descriptions
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant."),
-        ("human", "{input}")
-    ])
-    
-    # Create chain
-    chain = prompt | llm | StrOutputParser()
-    
-    # Test
-    try:
-        print("\nTesting chain...")
-        result = chain.invoke({"input": "What is machine learning?"})
-        print("\nSuccess! Result:", result)
-    except Exception as e:
-        print(f"\nError occurred: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        ("system", """You are a helpful AI assistant with access to tools. Answer the questions using the appropriate tools when needed.
 
-if __name__ == "__main__":
-    test_basic_chain()
+Available Tools:
+{tools}
+
+Use the following format:
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question"""),
+        MessagesPlaceholder(variable_name="chat_history", optional=True),
+        ("human", "{input}"),
+        MessagesPlaceholder(variable_name="agent_scratchpad"),
+    ])
+
+    # Format tool descriptions
+    tools_str = "\n".join(f"{tool.name}: {tool.description}" for tool in tools)
+    tool_names = ", ".join(tool.name for tool in tools)
+
+    # Create the agent
+    agent = create_react_agent(
+        llm=llm,
+        tools=tools,
+        prompt=prompt
+    )
+
+    # Create the executor
+    agent_executor = AgentExecutor(
+        agent=agent,
+        tools=tools,
+        verbose=verbose,
+        max_iterations=5,  # Limit maximum tool usage iterations
+        early_stopping_method="generate",  # Stop if answer is found before max_iterations
+        handle_parsing_errors=True  # Gracefully handle parsing errors
+    )
+
+    return agent_executor
