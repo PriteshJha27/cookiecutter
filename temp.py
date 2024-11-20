@@ -1,206 +1,268 @@
-from langchain.agents import initialize_agent, Tool, AgentType
-from langchain.chat_models import ChatOpenAI
-from langchain.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chains import RetrievalQA
-from typing import List, Dict
-import os
+import pandas as pd
+import numpy as np
+import faiss
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass
+from datetime import datetime
+from transformers import AutoModel, AutoTokenizer
+import torch
 
-# Initialize the base LLM
-llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo")
+@dataclass
+class TableSchema:
+    name: str
+    description: str
+    columns: Dict[str, str]  # column_name: description
+    relationships: Dict[str, str]  # column_name: related_table.column
+    key_metrics: List[str]
+    sample_queries: List[str]
 
-# Individual tools
-def load_pdf(pdf_path: str) -> List:
-    """Load PDF document and return pages"""
-    loader = PyPDFLoader(pdf_path)
-    return loader.load()
-
-def chunk_documents(documents: List) -> List:
-    """Split documents into chunks"""
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-    return text_splitter.split_documents(documents)
-
-def create_embeddings(chunks: List) -> FAISS:
-    """Create embeddings and store in vector database"""
-    embeddings = OpenAIEmbeddings()
-    return FAISS.from_documents(chunks, embeddings)
-
-def retrieve_docs(vectorstore: FAISS, query: str) -> List:
-    """Retrieve relevant documents based on query"""
-    return vectorstore.similarity_search(query, k=3)
-
-def query_llm(vectorstore: FAISS, query: str) -> str:
-    """Get answer from LLM using retrieved context"""
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vectorstore.as_retriever()
-    )
-    return qa_chain.run(query)
-
-# Initialize individual agents
-def create_loader_agent():
-    tools = [
-        Tool(
-            name="LoadPDF",
-            func=load_pdf,
-            description="Load a PDF document. Input should be the path to the PDF file."
-        )
-    ]
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.REACT_DOCSTORE,
-        verbose=True
-    )
-
-def create_chunking_agent():
-    tools = [
-        Tool(
-            name="ChunkDocuments",
-            func=chunk_documents,
-            description="Split documents into smaller chunks. Input should be a list of documents."
-        )
-    ]
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.REACT_DOCSTORE,
-        verbose=True
-    )
-
-def create_embedding_agent():
-    tools = [
-        Tool(
-            name="CreateEmbeddings",
-            func=create_embeddings,
-            description="Create embeddings for document chunks and store in vector database. Input should be a list of document chunks."
-        )
-    ]
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.REACT_DOCSTORE,
-        verbose=True
-    )
-
-def create_retrieval_agent():
-    tools = [
-        Tool(
-            name="RetrieveDocs",
-            func=retrieve_docs,
-            description="Retrieve relevant documents based on a query. Input should be a dictionary with 'vectorstore' and 'query' keys."
-        )
-    ]
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.REACT_DOCSTORE,
-        verbose=True
-    )
-
-def create_llm_agent():
-    tools = [
-        Tool(
-            name="QueryLLM",
-            func=query_llm,
-            description="Get answer from LLM using retrieved context. Input should be a dictionary with 'vectorstore' and 'query' keys."
-        )
-    ]
-    return initialize_agent(
-        tools=tools,
-        llm=llm,
-        agent=AgentType.REACT_DOCSTORE,
-        verbose=True
-    )
-
-class SupervisorAgent:
-    def __init__(self):
-        # Initialize all sub-agents
-        self.loader_agent = create_loader_agent()
-        self.chunking_agent = create_chunking_agent()
-        self.embedding_agent = create_embedding_agent()
-        self.retrieval_agent = create_retrieval_agent()
-        self.llm_agent = create_llm_agent()
+class LocalEmbeddingModel:
+    def __init__(self, model_path: str):
+        """
+        Initialize local embedding model
+        Args:
+            model_path: Path to directory containing model files
+        """
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model = AutoModel.from_pretrained(model_path)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(self.device)
         
-        # Create supervisor tool
-        self.tools = [
-            Tool(
-                name="LoaderAgent",
-                func=self.loader_agent.run,
-                description="Agent for loading PDF documents"
-            ),
-            Tool(
-                name="ChunkingAgent",
-                func=self.chunking_agent.run,
-                description="Agent for chunking documents"
-            ),
-            Tool(
-                name="EmbeddingAgent",
-                func=self.embedding_agent.run,
-                description="Agent for creating embeddings"
-            ),
-            Tool(
-                name="RetrievalAgent",
-                func=self.retrieval_agent.run,
-                description="Agent for retrieving relevant documents"
-            ),
-            Tool(
-                name="LLMAgent",
-                func=self.llm_agent.run,
-                description="Agent for querying LLM with context"
-            )
-        ]
+    def mean_pooling(self, model_output, attention_mask):
+        """Perform mean pooling on token embeddings"""
+        token_embeddings = model_output[0]
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+
+    def encode(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
+        """
+        Encode texts to embeddings
+        Args:
+            texts: List of texts to encode
+            batch_size: Batch size for processing
+        Returns:
+            Numpy array of embeddings
+        """
+        all_embeddings = []
         
-        # Initialize supervisor agent
-        self.agent = initialize_agent(
-            tools=self.tools,
-            llm=llm,
-            agent=AgentType.REACT_DOCSTORE,
-            verbose=True
-        )
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            
+            # Tokenize and move to device
+            encoded_input = self.tokenizer(
+                batch_texts,
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors='pt'
+            ).to(self.device)
+            
+            # Compute token embeddings
+            with torch.no_grad():
+                model_output = self.model(**encoded_input)
+            
+            # Perform pooling
+            embeddings = self.mean_pooling(model_output, encoded_input['attention_mask'])
+            
+            # Move to CPU and convert to numpy
+            embeddings = embeddings.cpu().numpy()
+            all_embeddings.append(embeddings)
+            
+        return np.vstack(all_embeddings)
+
+class UnderwritingRAG:
+    def __init__(self, model_path: str):
+        """
+        Initialize UnderwritingRAG with local model path
+        Args:
+            model_path: Path to directory containing model files
+        """
+        self.embedding_model = LocalEmbeddingModel(model_path)
+        self.index = None
+        self.schema_store = {}
+        self.dataframes = {}
+        
+        # Initialize schema definitions
+        self._initialize_schemas()
+
+    def _initialize_schemas(self):
+        """Initialize schema metadata for all tables"""
+        # [Previous schema definitions remain the same]
+        self.schema_store = {
+            "risk_assessment": TableSchema(
+                name="Risk Assessment",
+                description="Contains risk assessment details and recommendations for borrowers",
+                columns={
+                    "assessment_id": "Unique identifier for risk assessment",
+                    "borrower_id": "Foreign key to Borrower Profile",
+                    "risk_score": "Overall risk score (0-100)",
+                    "market_risk": "Market risk level (Low/Moderate/High)",
+                    "credit_risk": "Credit risk level (Low/Moderate/High)",
+                    "operational_risk": "Operational risk level (Low/Moderate/High)",
+                    "regulatory_risk": "Regulatory risk level (Low/Moderate/High)",
+                    "recommendation": "Final recommendation (Approve/Reject/Further Review)",
+                    "assessment_date": "Date of risk assessment",
+                    "reviewed_by": "Name of reviewing officer",
+                    "next_review_date": "Next scheduled review date"
+                },
+                relationships={
+                    "borrower_id": "borrower_profile.borrower_id"
+                },
+                key_metrics=[
+                    "risk_score",
+                    "recommendation",
+                    "risk_levels"
+                ],
+                sample_queries=[
+                    "What is the risk assessment for borrower TCS-1?",
+                    "Show all high credit risk assessments",
+                    "List rejected applications with risk scores above 50"
+                ]
+            ),
+            # [Rest of the schema definitions remain the same...]
+        }
+
+    def create_schema_embedding(self, table_name: str) -> str:
+        """Create rich schema description for embedding"""
+        # [Previous implementation remains the same]
+        schema = self.schema_store[table_name]
+        
+        schema_text = f"Table: {schema.name}\n"
+        schema_text += f"Description: {schema.description}\n\n"
+        
+        # Add columns
+        schema_text += "Columns:\n"
+        for col, desc in schema.columns.items():
+            schema_text += f"- {col}: {desc}\n"
+        
+        # Add relationships
+        if schema.relationships:
+            schema_text += "\nRelationships:\n"
+            for col, rel in schema.relationships.items():
+                schema_text += f"- {col} relates to {rel}\n"
+        
+        # Add key metrics
+        schema_text += "\nKey Metrics:\n"
+        for metric in schema.key_metrics:
+            schema_text += f"- {metric}\n"
+        
+        # Add sample queries
+        schema_text += "\nTypical Queries:\n"
+        for query in schema.sample_queries:
+            schema_text += f"- {query}\n"
+            
+        return schema_text
+
+    def add_dataframe(self, df: pd.DataFrame, table_name: str) -> None:
+        """Add a dataframe to the system"""
+        self.dataframes[table_name] = df
+        
+        if self.index is None:
+            # Create initial index with schema embedding
+            schema_text = self.create_schema_embedding(table_name)
+            embedding = self.embedding_model.encode([schema_text])[0]
+            self.index = faiss.IndexFlatL2(embedding.shape[0])
+            self.index.add(np.array([embedding]).astype('float32'))
+        else:
+            # Add schema embedding to existing index
+            schema_text = self.create_schema_embedding(table_name)
+            embedding = self.embedding_model.encode([schema_text])[0]
+            self.index.add(np.array([embedding]).astype('float32'))
+
+    def query(self, query: str, k: int = 2) -> List[Dict]:
+        """Query the system and return relevant tables and data"""
+        # Create query embedding
+        query_vector = self.embedding_model.encode([query])
+        query_vector = np.array(query_vector).astype('float32')
+        
+        # Search index
+        distances, indices = self.index.search(query_vector, k)
+        
+        # Get relevant tables
+        relevant_tables = []
+        for idx, distance in enumerate(distances[0]):
+            table_name = list(self.schema_store.keys())[indices[0][idx]]
+            schema = self.schema_store[table_name]
+            
+            relevant_tables.append({
+                'table_name': schema.name,
+                'relevance_score': float(distance),
+                'schema': schema,
+                'sample_data': self.dataframes[table_name].head(3) if table_name in self.dataframes else None
+            })
+            
+        return relevant_tables
+
+def format_query_results(results: List[Dict]) -> str:
+    """Format query results for LLM consumption"""
+    context = "Relevant tables for your query:\n\n"
     
-    def process_query(self, pdf_path: str, query: str) -> str:
-        """Orchestrate the complete RAG pipeline"""
-        try:
-            # Step 1: Load PDF
-            documents = self.loader_agent.run(f"Load PDF from path: {pdf_path}")
-            
-            # Step 2: Chunk documents
-            chunks = self.chunking_agent.run(f"Chunk these documents: {documents}")
-            
-            # Step 3: Create embeddings
-            vectorstore = self.embedding_agent.run(f"Create embeddings for chunks: {chunks}")
-            
-            # Step 4: Retrieve relevant documents
-            retrieval_input = {"vectorstore": vectorstore, "query": query}
-            relevant_docs = self.retrieval_agent.run(f"Retrieve documents for query: {retrieval_input}")
-            
-            # Step 5: Get answer from LLM
-            llm_input = {"vectorstore": vectorstore, "query": query}
-            final_answer = self.llm_agent.run(f"Get answer for query: {llm_input}")
-            
-            return final_answer
-            
-        except Exception as e:
-            return f"Error in processing: {str(e)}"
+    for result in results:
+        context += f"Table: {result['table_name']}\n"
+        context += f"Relevance Score: {result['relevance_score']:.4f}\n"
+        schema = result['schema']
+        
+        context += "Key Columns:\n"
+        for col, desc in schema.columns.items():
+            context += f"- {col}: {desc}\n"
+        
+        if result['sample_data'] is not None:
+            context += "\nSample Data:\n"
+            context += result['sample_data'].to_string()
+        
+        context += "\n\n"
+    
+    return context
 
 # Example usage
-if __name__ == "__main__":
-    # Set your OpenAI API key
-    os.environ["OPENAI_API_KEY"] = "your-api-key"
+def initialize_rag_system(model_path: str, risk_df, borrower_df, credit_df, ratios_df, statements_df):
+    """
+    Initialize RAG system with local model
+    Args:
+        model_path: Path to directory containing model files
+        risk_df: Risk assessment DataFrame
+        borrower_df: Borrower profile DataFrame
+        credit_df: Credit history DataFrame
+        ratios_df: Financial ratios DataFrame
+        statements_df: Financial statements DataFrame
+    Returns:
+        Initialized UnderwritingRAG instance
+    """
+    rag = UnderwritingRAG(model_path)
     
-    # Initialize supervisor
-    supervisor = SupervisorAgent()
+    # Add all dataframes
+    rag.add_dataframe(risk_df, "risk_assessment")
+    rag.add_dataframe(borrower_df, "borrower_profile")
+    rag.add_dataframe(credit_df, "credit_history")
+    rag.add_dataframe(ratios_df, "financial_ratios")
+    rag.add_dataframe(statements_df, "financial_statements")
     
-    # Process a query
-    pdf_path = "path/to/your/document.pdf"
-    query = "What is the main topic of the document?"
-    
-    response = supervisor.process_query(pdf_path, query)
-    print(f"Final Answer: {response}")
+    return rag
+
+# Usage example:
+"""
+# Specify path to local model files
+model_path = "path/to/local/minilm/model"
+
+# Read CSV files
+risk_df = pd.read_csv("Risk_Assessment.csv")
+borrower_df = pd.read_csv("Borrower_Profile.csv")
+credit_df = pd.read_csv("Credit_History.csv")
+ratios_df = pd.read_csv("Financial_Ratios.csv")
+statements_df = pd.read_csv("Financial_Statements.csv")
+
+# Initialize RAG with local model
+rag = initialize_rag_system(
+    model_path,
+    risk_df,
+    borrower_df,
+    credit_df,
+    ratios_df,
+    statements_df
+)
+
+# Query example
+query = "Find high-risk borrowers with poor financial ratios"
+results = rag.query(query)
+context = format_query_results(results)
+"""
