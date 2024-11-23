@@ -139,3 +139,109 @@ def show_qa():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+import streamlit as st
+
+# Set up the Streamlit app
+st.set_page_config(page_title="RAG Pipeline", page_icon="📚", layout="wide")
+
+# Main function
+def main():
+    # Sidebar navigation
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio(
+        "Choose a Page",
+        ["Home", "Load Data", "Load Vectorstore", "Q&A"],
+        index=0,
+    )
+
+    if page == "Home":
+        home_page()
+    elif page == "Load Data":
+        load_data_page()
+    elif page == "Load Vectorstore":
+        load_vectorstore_page()
+    elif page == "Q&A":
+        qa_page()
+
+# Home Page
+def home_page():
+    st.title("Welcome to the RAG Pipeline")
+    st.write("Choose an option to get started:")
+    choice = st.selectbox("Options", ["", "Load Data", "Load Vectorstore"])
+
+    if choice == "Load Data":
+        st.experimental_set_query_params(page="Load Data")
+    elif choice == "Load Vectorstore":
+        st.experimental_set_query_params(page="Load Vectorstore")
+
+# Load Data Page
+def load_data_page():
+    st.title("Load Data")
+
+    # File upload
+    st.subheader("Step 1: Upload PDFs")
+    pdf_files = st.file_uploader(
+        "Upload one or more PDF files", 
+        type=["pdf"], 
+        accept_multiple_files=True
+    )
+
+    st.subheader("Step 2: Upload CSVs")
+    csv_files = st.file_uploader(
+        "Upload one or more CSV files", 
+        type=["csv"], 
+        accept_multiple_files=True
+    )
+
+    st.subheader("Step 3: Upload Config")
+    config_file = st.file_uploader("Upload your config.yml file", type=["yml", "yaml"])
+
+    # Sidebar for chunk size
+    st.sidebar.title("Settings")
+    chunk_size = st.sidebar.number_input("Chunk Size", min_value=1, value=500, step=50)
+
+    # Submit button
+    if st.button("Submit"):
+        if pdf_files and csv_files and config_file:
+            st.write("Processing data in the backend... Please wait.")
+            # Backend processing logic can be called here
+            st.success("Vectorstore created successfully!")
+            if st.button("Go to Q&A"):
+                st.experimental_set_query_params(page="Q&A")
+        else:
+            st.warning("Please upload all required files before proceeding.")
+
+# Load Vectorstore Page
+def load_vectorstore_page():
+    st.title("Load Vectorstore")
+
+    st.subheader("Enter the path to the existing Vectorstore:")
+    vectorstore_path = st.text_input("Vectorstore Path")
+
+    if st.button("Go to Q&A"):
+        if vectorstore_path:
+            st.experimental_set_query_params(page="Q&A")
+        else:
+            st.warning("Please enter the vectorstore path before proceeding.")
+
+# Q&A Page
+def qa_page():
+    st.title("Q&A")
+
+    st.subheader("Ask a question based on the loaded data:")
+    query = st.text_input("Enter your question here")
+
+    if st.button("Submit"):
+        if query:
+            st.write("Fetching response...")  # Backend response handling here
+            st.success("Response: [Your response here]")  # Replace with actual response
+        else:
+            st.warning("Please enter a question.")
+
+if __name__ == "__main__":
+    main()
+
