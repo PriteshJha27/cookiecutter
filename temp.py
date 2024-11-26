@@ -1,50 +1,79 @@
 
 import networkx as nx
-import fitz  # PyMuPDF for PDF text extraction
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer, util
+from langchain.chat_models import ChatOpenAI
+from langchain.schema import HumanMessage
 from itertools import combinations
 
-# Step 1: Extract Text from PDF
-def extract_text_from_pdf(pdf_path):
-    doc = fitz.open(pdf_path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    return text
+# Initialize MiniLM model and ChatOpenAI
+model = SentenceTransformer("all-MiniLM-L6-v2")  # Embedding model
+chat_model = ChatOpenAI(model="gpt-4")  # Replace with your OpenAI model
 
-# Step 2: Extract Keywords
-def extract_keywords(text, max_features=10):
-    vectorizer = TfidfVectorizer(stop_words="english", max_features=max_features)
-    tfidf_matrix = vectorizer.fit_transform([text])
-    return vectorizer.get_feature_names_out()
+# Step 1: Sample Entities and Relationships
+entities = [
+    "Python is a programming language.",
+    "Python is used for data analysis.",
+    "Pandas is a library in Python.",
+    "Pandas is used for data manipulation.",
+    "Data analysis involves extracting insights from data.",
+]
 
-# Step 3: Create Graph
-def create_graph(keywords):
+# Step 2: Generate Entity Embeddings
+embeddings = model.encode(entities, convert_to_tensor=True)
+
+# Step 3: Build the Knowledge Graph
+def create_knowledge_graph(entities, embeddings, threshold=0.5):
     graph = nx.Graph()
-    graph.add_nodes_from(keywords)
-    # Connect nodes based on similarity
-    for node1, node2 in combinations(keywords, 2):
-        # Example: Adding edges with a simple weight
-        weight = cosine_similarity([[len(node1)]], [[len(node2)]])[0][0]
-        graph.add_edge(node1, node2, weight=weight)
+    graph.add_nodes_from(entities)
+    
+    # Compute similarity between entity pairs
+    for i, j in combinations(range(len(entities)), 2):
+        similarity = util.pytorch_cos_sim(embeddings[i], embeddings[j]).item()
+        if similarity > threshold:
+            graph.add_edge(entities[i], entities[j], weight=similarity)
     return graph
 
-# Step 4: Visualize the Graph
-def visualize_graph(graph):
-    import matplotlib.pyplot as plt
-    pos = nx.spring_layout(graph)
-    nx.draw(graph, pos, with_labels=True, node_size=2000, font_size=10)
-    edge_labels = nx.get_edge_attributes(graph, "weight")
-    nx.draw_networkx_edge_labels(graph, pos, edge_labels=edge_labels)
-    plt.show()
+graph = create_knowledge_graph(entities, embeddings)
 
-# Main Execution
-pdf_path = "example.pdf"  # Replace with your PDF file
-text = extract_text_from_pdf(pdf_path)
-keywords = extract_keywords(text)
-graph = create_graph(keywords)
+# Step 4: Query the Knowledge Graph
+def query_graph(graph, query):
+    """
+    Find nodes and edges relevant to the query.
+    """
+    query_embedding = model.encode(query, convert_to_tensor=True)
+    nodes = list(graph.nodes)
+    node_embeddings = model.encode(nodes, convert_to_tensor=True)
+    
+    # Find the most similar node(s) to the query
+    similarities = util.pytorch_cos_sim(query_embedding, node_embeddings)
+    most_similar_idx = similarities.argmax().item()
+    relevant_node = nodes[most_similar_idx]
+    
+    # Fetch neighbors and their relationships
+    neighbors = list(graph.neighbors(relevant_node))
+    relationships = [(relevant_node, neighbor, graph[relevant_node][neighbor]["weight"]) for neighbor in neighbors]
+    
+    return relevant_node, relationships
 
-print("Nodes in Graph:", graph.nodes)
-print("Edges in Graph:", graph.edges)
-visualize_graph(graph)
+query = "What is Python used for?"
+main_node, relations = query_graph(graph, query)
+
+# Step 5: Use ChatOpenAI for Reasoning
+def generate_response(main_node, relations):
+    """
+    Use ChatOpenAI to explain relationships.
+    """
+    context = f"The main entity is '{main_node}'. The related entities and their relationships are as follows:\n"
+    for relation in relations:
+        context += f"- '{relation[1]}' (similarity: {relation[2]:.2f})\n"
+    
+    prompt = (
+        f"{context}\n\nBased on this knowledge graph, answer the query: "
+        f"'{query}'. Provide a detailed and accurate response."
+    )
+    
+    response = chat_model([HumanMessage(content=prompt)])
+    return response.content
+
+response = generate_response(main_node, relations)
+print("LARK Response:\n", response)
