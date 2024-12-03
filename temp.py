@@ -22,7 +22,7 @@ class ChatAmexLlama(BaseLLM):
     
     _auth_token: Optional[str] = None
     _client: Optional[httpx.Client] = None
-
+    
     model_config = ConfigDict(arbitrary_types_allowed=True)
     
     def __init__(self, **kwargs):
@@ -31,7 +31,7 @@ class ChatAmexLlama(BaseLLM):
         print(f"Base URL: {self.base_url}")
         
         self._client = httpx.Client(
-            verify=False,
+            verify=False,  # Disable SSL verification
             timeout=30.0
         )
 
@@ -66,6 +66,77 @@ class ChatAmexLlama(BaseLLM):
             
         except Exception as e:
             raise ValueError(f"Authentication failed: {str(e)}")
+
+    def _stream(
+        self,
+        prompt: str,
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[Generation]:
+        """Stream response from LLM."""
+        auth_token = self.get_auth_token()
+        api_url = f"{self.base_url.rstrip('/')}/chat/completions"
+        
+        payload = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful AI assistant."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "model": self.model_name,
+            "stream": True
+        }
+        
+        print(f"Making streaming request to: {api_url}")
+        print(f"With payload: {json.dumps(payload, indent=2)}")
+
+        response = self._client.post(
+            api_url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Cookie": auth_token
+            },
+            timeout=30.0
+        )
+        
+        if response.status_code != 200:
+            raise ValueError(f"API call failed: {response.status_code} - {response.text}")
+            
+        for line in response.iter_lines():
+            if not line:
+                continue
+                
+            try:
+                line_text = line.decode('utf-8')
+                if line_text.startswith('data: '):
+                    line_text = line_text[6:]
+                    
+                # Parse the JSON content
+                if line_text.strip():
+                    chunk_data = json.loads(line_text)
+                    if chunk_data.get("choices"):
+                        delta = chunk_data["choices"][0].get("delta", {})
+                        if "content" in delta:
+                            content = delta["content"]
+                            yield Generation(text=content)
+                            
+                            if run_manager:
+                                run_manager.on_llm_new_token(content)
+                                
+            except json.JSONDecodeError as e:
+                print(f"Error parsing line: {line_text}")
+                continue
+            except Exception as e:
+                print(f"Error processing line: {str(e)}")
+                continue
 
     def _generate(
         self,
@@ -130,83 +201,6 @@ class ChatAmexLlama(BaseLLM):
                 raise ValueError(f"Generation failed: {str(e)}")
         
         return LLMResult(generations=generations)
-        
-    def _stream(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> Iterator[Generation]:
-        """Stream response from LLM."""
-        auth_token = self.get_auth_token()
-        api_url = f"{self.base_url.rstrip('/')}/chat/completions"
-        
-        payload = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a helpful AI assistant."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            "model": self.model_name,
-            "stream": True
-        }
-        
-        print(f"Making streaming request to: {api_url}")
-        print(f"With payload: {json.dumps(payload, indent=2)}")
-
-        try:
-            response = self._client.post(
-                api_url,
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                    "Cookie": auth_token
-                }
-            )
-            
-            if response.status_code != 200:
-                raise ValueError(f"API call failed: {response.status_code} - {response.text}")
-            
-            # Read and process the response content as text
-            response_text = response.text
-            for line in response_text.split('\n'):
-                if not line:
-                    continue
-                    
-                try:
-                    # Handle SSE format
-                    if line.startswith('data: '):
-                        line = line[6:]
-                    
-                    # Parse the JSON content
-                    if line.strip():
-                        chunk_data = json.loads(line)
-                        if chunk_data.get("choices"):
-                            delta = chunk_data["choices"][0].get("delta", {})
-                            if "content" in delta:
-                                content = delta["content"]
-                                yield Generation(text=content)
-                                
-                                if run_manager:
-                                    run_manager.on_llm_new_token(content)
-                
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing line: {line}")
-                    continue
-                except Exception as e:
-                    print(f"Error processing line: {str(e)}")
-                    continue
-                    
-        except Exception as e:
-            print(f"Stream error: {str(e)}")
-            raise ValueError(f"Streaming failed: {str(e)}")
 
     def __del__(self):
         """Cleanup client on deletion."""
