@@ -1,69 +1,96 @@
-# Custom exception hierarchy
-class LlamaAPIError(Exception):
-    """Base exception for Llama API errors."""
-    def __init__(self, message: str, status_code: Optional[int] = None):
-        super().__init__(message)
-        self.status_code = status_code
+import logging
+from typing import AsyncIterator, Dict, Any
+import json
+import httpx
 
-class LlamaAuthError(LlamaAPIError):
-    """Authentication related errors."""
-    pass
-
-class LlamaResponseError(LlamaAPIError):
-    """Response parsing and validation errors."""
-    pass
-
-class LlamaStreamError(LlamaAPIError):
-    """Streaming specific errors."""
-    pass
-
-# Retry decorator for API calls
-def retry_api_call(func):
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((TransportError, LlamaAPIError))
-    )
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"API call failed: {str(e)}")
-            raise
-    return wrapper
+logger = logging.getLogger(__name__)
+# Set logging level to DEBUG for development
+logger.setLevel(logging.DEBUG)
 
 class BaseChatAmexLlama(BaseChatModel):
-    @retry_api_call
-    async def _get_auth_token_async(self) -> str:
-        """Get authentication token with proper error handling and retries."""
-        if self._auth_token:
-            return self._auth_token
-
+    async def _astream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        """Enhanced streaming implementation with detailed debugging."""
         try:
-            response = await self._async_client.post(
-                self.auth_url,
-                data={
-                    "userId": self.user_id,
-                    "pwd": self.pwd
-                },
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "*/*"
-                }
-            )
+            # Log authentication status
+            auth_token = await self._get_auth_token_async()
+            logger.debug(f"Authentication successful, token received")
+            
+            api_url = f"{self.base_url.rstrip('/')}/chat/completions"
+            logger.debug(f"Making streaming request to: {api_url}")
+            
+            messages_dict = [self._convert_message_to_dict(m) for m in messages]
+            
+            # Construct payload with all required parameters
+            payload = {
+                "messages": messages_dict,
+                "model": self.model_name,
+                "stream": True,
+                "temperature": self.temperature,
+                **kwargs
+            }
+            logger.debug(f"Request payload: {json.dumps(payload, indent=2)}")
 
-            if response.status_code != 200:
-                raise LlamaAuthError(
-                    f"Authentication failed: {response.status_code} - {response.text}",
-                    status_code=response.status_code
-                )
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",  # Changed to handle SSE properly
+                "Cookie": auth_token
+            }
+            logger.debug(f"Request headers: {headers}")
 
-            auth_token = response.headers.get("Set-Cookie")
-            if not auth_token:
-                raise LlamaAuthError("No authentication token received")
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                try:
+                    async with client.stream(
+                        "POST",
+                        api_url,
+                        json=payload,
+                        headers=headers
+                    ) as response:
+                        logger.debug(f"Initial response status: {response.status_code}")
+                        
+                        if response.status_code != 200:
+                            error_body = await response.aread()
+                            error_text = error_body.decode('utf-8')
+                            logger.error(f"Streaming request failed - Status: {response.status_code}, Response: {error_text}")
+                            raise ValueError(f"Streaming request failed: {response.status_code} - {error_text}")
 
-            self._auth_token = auth_token
-            return auth_token
+                        async for line in response.aiter_lines():
+                            logger.debug(f"Received line: {line}")
+                            
+                            if not line or line.isspace():
+                                continue
+
+                            # Handle SSE format
+                            if line.startswith('data: '):
+                                line = line[6:]
+                            
+                            try:
+                                chunk_data = json.loads(line)
+                                if chunk_data.get("choices"):
+                                    delta = chunk_data["choices"][0].get("delta", {})
+                                    if content := delta.get("content"):
+                                        chunk = ChatGenerationChunk(
+                                            message=AIMessageChunk(content=content),
+                                            generation_info={"finish_reason": None}
+                                        )
+                                        
+                                        if run_manager:
+                                            await run_manager.on_llm_new_token(content)
+                                        
+                                        yield chunk
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to decode chunk: {line} - Error: {str(e)}")
+                                continue
+                            
+                except httpx.RequestError as e:
+                    logger.error(f"Request failed: {str(e)}")
+                    raise
 
         except Exception as e:
-            raise LlamaAuthError(f"Authentication failed: {str(e)}")
+            logger.error(f"Streaming failed: {str(e)}", exc_info=True)
+            raise ValueError(f"Streaming failed: {str(e)}")
