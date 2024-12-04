@@ -1,79 +1,97 @@
-def _generate(
+def _stream(
     self,
     messages: List[BaseMessage],
     stop: Optional[List[str]] = None,
     run_manager: Optional[CallbackManagerForLLMRun] = None,
     **kwargs: Any,
-) -> ChatResult:
-    """Generate chat completion results."""
-    auth_token = self.get_auth_token()
-    api_url = f"{self.base_url.rstrip('/')}/chat/completions"
-    
-    messages_dict = [self._convert_message_to_dict(m) for m in messages]
-    payload = {
-        "messages": messages_dict,
-        "model": self.model_name,
-        "stream": False,  # Ensure streaming is False for regular generation
-        "temperature": self.temperature,
-        **kwargs
-    }
-    
+) -> Iterator[ChatGenerationChunk]:
+    """Stream chat completion results."""
     try:
-        response = self._client.post(
-            api_url,
+        auth_token = self.get_auth_token()
+        api_url = f"{self.base_url.rstrip('/')}/chat/completions"
+        
+        messages_dict = [self._convert_message_to_dict(m) for m in messages]
+        
+        payload = {
+            "messages": messages_dict,
+            "model": self.model_name,
+            "stream": True,
+            "temperature": self.temperature,
+            **kwargs
+        }
+        
+        # Important: Use requests directly for streaming
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": auth_token
+        }
+        
+        # Make streaming request
+        response = self._client.request(
+            method="POST",
+            url=api_url,
+            headers=headers,
             json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Cookie": auth_token
-            }
+            stream=True  # This is the key part
         )
         
+        # Check response status immediately
         if response.status_code != 200:
-            error_msg = f"API call failed: {response.status_code}"
+            raise ValueError(f"API call failed: {response.status_code} - {response.text}")
+
+        # Process the streaming response
+        for raw_chunk in response.iter_raw():
+            if not raw_chunk:
+                continue
+            
             try:
-                error_msg += f" - {response.json()}"
-            except:
-                error_msg += f" - {response.text}"
-            raise ValueError(error_msg)
-        
-        response_data = response.json()
-        
-        # Validate response structure
-        if "choices" not in response_data or not response_data["choices"]:
-            raise ValueError("Invalid response format: missing or empty choices")
-            
-        if "message" not in response_data["choices"][0]:
-            raise ValueError("Invalid response format: missing message in choice")
-            
-        content = response_data["choices"][0]["message"].get("content", "")
-        message = AIMessage(content=content)
-        generations = [ChatGeneration(message=message)]
-        
-        return ChatResult(generations=generations)
-        
-    except json.JSONDecodeError:
-        raise ValueError(f"Failed to decode API response: {response.text}")
+                # Decode chunk
+                chunk_text = raw_chunk.decode('utf-8')
+                if chunk_text.startswith('data: '):
+                    chunk_text = chunk_text[6:]
+                
+                # Skip empty chunks
+                if not chunk_text.strip():
+                    continue
+                    
+                # Parse JSON
+                chunk_data = json.loads(chunk_text)
+                if chunk_data.get("choices"):
+                    delta = chunk_data["choices"][0].get("delta", {})
+                    if content := delta.get("content"):
+                        chunk = ChatGenerationChunk(
+                            message=AIMessageChunk(content=content),
+                            generation_info={"finish_reason": None}
+                        )
+                        
+                        if run_manager:
+                            run_manager.on_llm_new_token(content)
+                            
+                        yield chunk
+                        
+            except json.JSONDecodeError:
+                print(f"Failed to decode JSON from chunk: {chunk_text}")
+                continue
+            except Exception as e:
+                print(f"Error processing chunk: {str(e)}")
+                continue
+                
     except Exception as e:
-        raise ValueError(f"Error during API call: {str(e)}")
+        raise ValueError(f"Streaming failed: {str(e)}")
 
 
-def invoke(
+def stream(
     self,
     input: Union[str, List[BaseMessage]],
     config: Optional[dict] = None,
     **kwargs: Any
-) -> Union[BaseMessage, ChatResult]:
-    """Invoke the chat model."""
+) -> Iterator[BaseMessageChunk]:
+    """Stream the chat model response."""
     try:
         messages = self._convert_input_to_messages(input)
-        result = self._generate(messages, **kwargs)
-        
-        if not result.generations:
-            raise ValueError("No generations returned from model")
-            
-        # Return just the message if single generation
-        return result.generations[0].message if len(result.generations) == 1 else result
-        
+        for chunk in self._stream(messages, **kwargs):
+            if chunk.message:
+                yield chunk.message
     except Exception as e:
-        raise ValueError(f"Error during invocation: {str(e)}")
+        raise ValueError(f"Streaming failed: {str(e)}")
