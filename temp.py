@@ -1,4 +1,3 @@
-
 from typing import Any, Dict, Iterator, List, Optional, Union, Sequence, Literal, Type, AsyncIterator
 from langchain_core.language_models import BaseLLM, BaseChatModel
 from langchain_core.messages import (
@@ -22,8 +21,8 @@ load_dotenv()
 class BaseChatAmexLlama(BaseChatModel):
     """Base Chat wrapper for Llama API with async support."""
     
-    base_url: str = "https://sidegenieservices-qa.aexp.com/app/v1/opensource/models/llama3-70b-instruct/"
-    auth_url: str = "https://antiblauevcqa-v1p.phx.amex.com/fcol/signin/"
+    base_url: str = ""
+    auth_url: str = ""
     cert_path: str = os.getenv('CERT_PATH')
     user_id: str = os.getenv('LLAMA_USER_ID')
     pwd: str = os.getenv('LLAMA_PASSWORD')
@@ -82,6 +81,8 @@ class BaseChatAmexLlama(BaseChatModel):
             
         except Exception as e:
             raise ValueError(f"Async authentication failed: {str(e)}")
+        
+    
 
     async def _astream(
         self,
@@ -213,7 +214,7 @@ class BaseChatAmexLlama(BaseChatModel):
         )
         
         return ChatResult(generations=messages)
-
+    
     
     def format_tool_call(
         self,
@@ -376,6 +377,189 @@ class BaseChatAmexLlama(BaseChatModel):
         )
         return [tool_system_message] + messages
 
+
+    def _stream(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Stream chat completion results."""
+        auth_token = self.get_auth_token()
+        api_url = f"{self.base_url.rstrip('/')}/chat/completions"
+        
+        messages_dict = [self._convert_message_to_dict(m) for m in messages]
+        
+        payload = {
+            "messages": messages_dict,
+            "model": self.model_name,
+            "stream": True,
+            "temperature": self.temperature,
+            **kwargs
+        }
+        
+        if self.response_format:
+            payload["response_format"] = self.response_format
+
+        response = self._client.post(
+            api_url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Cookie": auth_token
+            },
+            stream=True
+        )
+        
+        if response.status_code != 200:
+            raise ValueError(f"API call failed: {response.status_code} - {response.text}")
+        
+        for line in response.iter_lines():
+            if not line:
+                continue
+            
+            try:
+                line_text = line.decode('utf-8')
+                if line_text.startswith('data: '):
+                    line_text = line_text[6:]
+                
+                if line_text.strip():
+                    chunk_data = json.loads(line_text)
+                    if chunk_data.get("choices"):
+                        delta = chunk_data["choices"][0].get("delta", {})
+                        if content := delta.get("content"):
+                            chunk = ChatGenerationChunk(
+                                message=AIMessageChunk(content=content),
+                                generation_info={"finish_reason": None}
+                            )
+                            yield chunk
+                            
+                            if run_manager:
+                                run_manager.on_llm_new_token(content)
+            except json.JSONDecodeError:
+                continue
+            except Exception as e:
+                print(f"Error processing chunk: {str(e)}")
+                continue
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        """Generate chat completion results."""
+        if self.streaming:
+            chunks: List[ChatGenerationChunk] = []
+            for chunk in self._stream(messages, stop, run_manager, **kwargs):
+                chunks.append(chunk)
+            return self._combine_chat_chunks(chunks)
+            
+        auth_token = self.get_auth_token()
+        api_url = f"{self.base_url.rstrip('/')}/chat/completions"
+        
+        messages_dict = [self._convert_message_to_dict(m) for m in messages]
+        payload = {
+            "messages": messages_dict,
+            "model": self.model_name,
+            "stream": False,
+            "temperature": self.temperature,
+            **kwargs
+        }
+        
+        if self.response_format:
+            payload["response_format"] = self.response_format
+        
+        response = self._client.post(
+            api_url,
+            json=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Cookie": auth_token
+            }
+        )
+        
+        if response.status_code != 200:
+            raise ValueError(f"API call failed: {response.status_code} - {response.text}")
+        
+        response_data = response.json()
+        message = AIMessage(content=response_data["choices"][0]["message"]["content"])
+        generations = [ChatGeneration(message=message)]
+        
+        return ChatResult(generations=generations)
+
+    def _convert_message_to_dict(self, message: BaseMessage) -> dict:
+        """Convert a LangChain message to a dictionary."""
+        if isinstance(message, SystemMessage):
+            return {"role": "system", "content": message.content}
+        elif isinstance(message, HumanMessage):
+            return {"role": "user", "content": message.content}
+        elif isinstance(message, AIMessage):
+            message_dict = {"role": "assistant", "content": message.content}
+            if "function_call" in message.additional_kwargs:
+                message_dict["function_call"] = message.additional_kwargs["function_call"]
+            if message.additional_kwargs.get("tool_calls"):
+                message_dict["tool_calls"] = message.additional_kwargs["tool_calls"]
+            return message_dict
+        else:
+            raise ValueError(f"Got unknown message type: {type(message)}")
+
+    def get_auth_token(self) -> str:
+        """Get authentication token."""
+        if self._auth_token:
+            return self._auth_token
+            
+        try:
+            print("Sending auth request...")
+            response = self._client.post(
+                self.auth_url,
+                data={
+                    "userid": self.user_id,
+                    "pwd": self.pwd
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "*/*"
+                }
+            )
+            print(f"Auth Response Status: {response.status_code}")
+            
+            if response.status_code != 200:
+                raise ValueError(f"Authentication failed: {response.status_code} - {response.text}")
+                
+            self._auth_token = response.headers.get("Set-Cookie")
+            if not self._auth_token:
+                raise ValueError("No authentication token received")
+                
+            return self._auth_token
+            
+        except Exception as e:
+            raise ValueError(f"Authentication failed: {str(e)}")
+
+
+    @property
+    def _default_config(self) -> Dict[str, Any]:
+        """Get default configuration."""
+        return {
+            "base_url": self.base_url,
+            "auth_url": self.auth_url,
+            "model_name": self.model_name,
+            "temperature": self.temperature,
+            "streaming": self.streaming,
+            "response_format": self.response_format,
+        }
+
+    
+
+
+
+            
+class ChatAmexLlama(BaseChatAmexLlama):
+    """Llama chat model with advanced features."""
     
     stream_usage: bool = False
     max_retries: int = 2
@@ -565,5 +749,3 @@ class ResponseFormat(BaseModel):
 structured_llm = llm.with_structured_output(ResponseFormat)
 response = structured_llm.invoke("What is 2+2?")
 """
-
-
