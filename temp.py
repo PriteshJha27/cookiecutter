@@ -1,87 +1,69 @@
-import logging
-from typing import AsyncIterator, Dict, Any
-from httpx import AsyncClient, Response, TransportError
-import json
-from tenacity import retry, stop_after_attempt, wait_exponential
+# Custom exception hierarchy
+class LlamaAPIError(Exception):
+    """Base exception for Llama API errors."""
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
-logger = logging.getLogger(__name__)
+class LlamaAuthError(LlamaAPIError):
+    """Authentication related errors."""
+    pass
+
+class LlamaResponseError(LlamaAPIError):
+    """Response parsing and validation errors."""
+    pass
+
+class LlamaStreamError(LlamaAPIError):
+    """Streaming specific errors."""
+    pass
+
+# Retry decorator for API calls
+def retry_api_call(func):
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((TransportError, LlamaAPIError))
+    )
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"API call failed: {str(e)}")
+            raise
+    return wrapper
 
 class BaseChatAmexLlama(BaseChatModel):
-    async def _astream(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[ChatGenerationChunk]:
-        """Enhanced streaming implementation with proper error handling."""
+    @retry_api_call
+    async def _get_auth_token_async(self) -> str:
+        """Get authentication token with proper error handling and retries."""
+        if self._auth_token:
+            return self._auth_token
+
         try:
-            auth_token = await self._get_auth_token_async()
-            api_url = f"{self.base_url.rstrip('/')}/chat/completions"
-            
-            messages_dict = [self._convert_message_to_dict(m) for m in messages]
-            
-            payload = {
-                "messages": messages_dict,
-                "model": self.model_name,
-                "stream": True,
-                "temperature": self.temperature,
-                **kwargs
-            }
+            response = await self._async_client.post(
+                self.auth_url,
+                data={
+                    "userId": self.user_id,
+                    "pwd": self.pwd
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "*/*"
+                }
+            )
 
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Cookie": auth_token
-            }
+            if response.status_code != 200:
+                raise LlamaAuthError(
+                    f"Authentication failed: {response.status_code} - {response.text}",
+                    status_code=response.status_code
+                )
 
-            async with self._async_client.stream(
-                method="POST",
-                url=api_url,
-                json=payload,
-                headers=headers,
-                timeout=30.0
-            ) as response:
-                if response.status_code != 200:
-                    error_body = await response.aread()
-                    logger.error(f"Streaming request failed: {response.status_code} - {error_body}")
-                    raise LlamaResponseError(
-                        f"Streaming request failed: {response.status_code} - {error_body.decode()}"
-                    )
+            auth_token = response.headers.get("Set-Cookie")
+            if not auth_token:
+                raise LlamaAuthError("No authentication token received")
 
-                # Process the streaming response
-                async for line in response.aiter_lines():
-                    if not line or line.isspace():
-                        continue
-
-                    if line.startswith('data: '):
-                        line = line[6:]  # Remove 'data: ' prefix
-                        
-                    try:
-                        chunk_data = json.loads(line)
-                        if chunk_data.get("choices"):
-                            delta = chunk_data["choices"][0].get("delta", {})
-                            if content := delta.get("content"):
-                                chunk = ChatGenerationChunk(
-                                    message=AIMessageChunk(content=content),
-                                    generation_info={"finish_reason": None}
-                                )
-                                
-                                if run_manager:
-                                    await run_manager.on_llm_new_token(content)
-                                    
-                                yield chunk
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Failed to decode chunk: {line} - Error: {str(e)}")
-                        continue
-                    except Exception as e:
-                        logger.error(f"Error processing chunk: {str(e)}")
-                        continue
+            self._auth_token = auth_token
+            return auth_token
 
         except Exception as e:
-            logger.error(f"Streaming failed: {str(e)}")
-            raise LlamaResponseError(f"Streaming failed: {str(e)}")
-
-
-
-
+            raise LlamaAuthError(f"Authentication failed: {str(e)}")
