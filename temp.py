@@ -1,17 +1,14 @@
-from langchain_core.callbacks.manager import CallbackManagerForLLMRun, AsyncCallbackManagerForLLMRun
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain.chat_models import ChatOllama
 import os
 from dotenv import load_dotenv
 import httpx
-import json
-from typing import Any, Dict, List, Optional, Iterator, AsyncIterator, Union, Mapping
-from langchain_core.messages import (
-    AIMessage,
-    AIMessageChunk,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage
-)
+import urllib3
+from typing import Any, Dict, List, Optional
+from langchain_core.messages import HumanMessage, SystemMessage
+
+# Disable SSL verification warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class AmexLlamaChatModel(ChatOllama):
     """Custom ChatOllama for AEXP's hosted Llama model."""
@@ -21,7 +18,7 @@ class AmexLlamaChatModel(ChatOllama):
         load_dotenv()
         
         # Set base configuration
-        base_url = "https://aidageniservices-qa.aexp.com/app/v1/opensource/models/llama3-70b-instruct/chat/completions"
+        base_url = "https://aidageniservices-qa.aexp.com/app/v1/opensource/models/llama3-70b-instruct/"
         auth_url = "https://authbluesvcqa-vip.phx.aexp.com/sso1/signin/"
         model_name = "llama3-70b-instruct"
         
@@ -30,31 +27,37 @@ class AmexLlamaChatModel(ChatOllama):
         user_id = os.getenv('LLAMA_USER_ID')
         pwd = os.getenv('LLAMA_PASSWORD')
         
-        # Get authentication token
-        self.auth_token = self._get_auth_token(auth_url, user_id, pwd)
+        # Create SSL context
+        verify = False  # Disable SSL verification
         
-        # Initialize parent class
+        # Get authentication token
+        auth_token = self._get_auth_token(auth_url, user_id, pwd)
+        
+        # Set up headers for the client
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Cookie": auth_token
+        }
+        
+        # Initialize parent class with our custom configuration
         super().__init__(
             base_url=base_url,
             model=model_name,
+            client_kwargs={
+                "headers": headers,
+                "verify": verify,
+                "timeout": 30.0
+            },
             **kwargs
         )
-
-    def _get_headers(self) -> Dict[str, str]:
-        """Get request headers including auth token."""
-        return {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Cookie": self.auth_token
-        }
-
+    
     def _get_auth_token(self, auth_url: str, user_id: str, pwd: str) -> str:
         """Get authentication token from the auth service."""
         try:
-            client = httpx.Client(
-                verify=os.getenv('CERT_PATH'),
-                timeout=30.0
-            )
+            # Configure client with SSL verification disabled
+            transport = httpx.HTTPTransport(verify=False)
+            client = httpx.Client(transport=transport, timeout=30.0)
             
             print("Sending auth request...")
             response = client.post(
@@ -85,81 +88,24 @@ class AmexLlamaChatModel(ChatOllama):
         finally:
             client.close()
 
-    def _create_chat_stream(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> Iterator[Union[Mapping[str, Any], str]]:
-        chat_params = self._chat_params(messages, stop, **kwargs)
-        
-        client = httpx.Client(
-            verify=os.getenv('CERT_PATH'),
-            timeout=30.0
+def main():
+    try:
+        # Initialize the model
+        llm = AmexLlamaChatModel(
+            temperature=0.7,
         )
         
-        try:
-            if chat_params["stream"]:
-                response = client.post(
-                    self.base_url,
-                    json=chat_params,
-                    headers=self._get_headers()
-                )
-                yield from response.iter_lines()
-            else:
-                response = client.post(
-                    self.base_url,
-                    json=chat_params,
-                    headers=self._get_headers()
-                )
-                yield response.json()
-        finally:
-            client.close()
-
-    async def _acreate_chat_stream(
-        self,
-        messages: List[BaseMessage],
-        stop: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[Union[Mapping[str, Any], str]]:
-        chat_params = self._chat_params(messages, stop, **kwargs)
+        # Example chat
+        messages = [
+            SystemMessage(content="You are a helpful AI assistant."),
+            HumanMessage(content="What is 2+2?")
+        ]
         
-        async with httpx.AsyncClient(
-            verify=os.getenv('CERT_PATH'),
-            timeout=30.0
-        ) as client:
-            if chat_params["stream"]:
-                async with client.stream(
-                    'POST',
-                    self.base_url,
-                    json=chat_params,
-                    headers=self._get_headers()
-                ) as response:
-                    async for line in response.aiter_lines():
-                        if line:
-                            yield json.loads(line)
-            else:
-                response = await client.post(
-                    self.base_url,
-                    json=chat_params,
-                    headers=self._get_headers()
-                )
-                yield response.json()
-
-def main():
-    # Initialize the model
-    llm = AmexLlamaChatModel(
-        temperature=0.7,
-    )
-    
-    # Example chat
-    messages = [
-        SystemMessage(content="You are a helpful AI assistant."),
-        HumanMessage(content="What is 2+2?")
-    ]
-    
-    response = llm.invoke(messages)
-    print(response)
+        response = llm.invoke(messages)
+        print(response)
+        
+    except Exception as e:
+        print(f"Error occurred: {str(e)}")
 
 if __name__ == "__main__":
     main()
