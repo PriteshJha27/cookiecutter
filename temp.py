@@ -1,6 +1,6 @@
 from ollama_baseclient import BaseClient, AsyncBaseClient
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage, ChatGeneration, ChatResult, AIMessage
+from langchain_core.messages import BaseMessage, ChatGeneration, ChatResult, AIMessage, HumanMessage
 from typing import List, Optional, Union, Any
 from pydantic import Field, PrivateAttr
 import httpx
@@ -36,15 +36,13 @@ class ChatOllama(BaseChatModel):
             raise ValueError("Authentication failed: Token not received")
         return token
 
-    def invoke(self, messages: List[BaseMessage]) -> str:
-        """Invoke the LLM with the given messages."""
-        payload = {"messages": [{"role": msg.role, "content": msg.content} for msg in messages]}
+    def invoke(self, input: Union[str, List[BaseMessage]]) -> str:
+        """Invoke the LLM with the given input."""
+        if isinstance(input, str):
+            input = [HumanMessage(content=input)]
+        payload = {"messages": [{"role": msg.role, "content": msg.content} for msg in input]}
         response = self._client.post("/chat/completions", json=payload)
         return response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-
-    def bind_tools(self, tools: List[Any]) -> None:
-        """Bind custom tools to the LLM."""
-        self.tools = tools
 
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None, **kwargs) -> ChatResult:
         """Generate a single response for the given messages."""
@@ -55,6 +53,10 @@ class ChatOllama(BaseChatModel):
         chat_generation = ChatGeneration(message=chat_message)
         return ChatResult(generations=[chat_generation])
 
+    def bind_tools(self, tools: List[Any]) -> None:
+        """Bind custom tools to the LLM."""
+        self.tools = tools
+
     @property
     def _llm_type(self) -> str:
         """Return the type of the LLM."""
@@ -62,26 +64,39 @@ class ChatOllama(BaseChatModel):
 
 
 
-
 from ollama_ChatOllama import ChatOllama
 from langchain_core.messages import HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
 
-# Initialize ChatOllama
+# Initialize ChatOllama with environment variables
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 llm = ChatOllama(
-    base_url="https://your-llama-base-url.com",
-    auth_url="https://your-authentication-url.com",
-    user_id="your-user-id",
-    password="your-password",
+    base_url=os.getenv("LLAMA_API_URL"),
+    auth_url=os.getenv("LLAMA_AUTH_URL"),
+    user_id=os.getenv("LLAMA_USER_ID"),
+    password=os.getenv("LLAMA_PASSWORD"),
+)
+
+# Create a prompt template
+prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", "You are a helpful assistant."),
+        ("human", "{input}"),
+    ]
 )
 
 # Test invoke
 messages = [HumanMessage(content="What is 2 + 2?")]
-response = llm.invoke(messages)
+chain = prompt | llm
+response = chain.invoke({"input": "What is 2 + 2?"})
 print(f"Response: {response}")
 
 # Test bind_tools
 def custom_tool(input_text: str) -> str:
-    return f"Processed by tool: {input_text}"
+    return f"Processed by tool: {input_text.upper()}"
 
 llm.bind_tools([custom_tool])
 print("Tools bound successfully!")
