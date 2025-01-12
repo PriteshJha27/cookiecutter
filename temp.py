@@ -1,41 +1,44 @@
-
-from typing import Dict
+from typing import Dict, List
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
 
-def create_evaluation_chain(llm: ChatOpenAI = ChatOpenAI()):
-    # Create prompt template for evaluation
+def create_correction_chain(llm: ChatOpenAI = ChatOpenAI()):
+    # Create prompt template for generating improved response
     prompt = ChatPromptTemplate.from_template("""
-    You are an expert evaluator. Assess if the response adequately answers the user's query.
-    Consider these aspects in your evaluation:
-    1. Relevance: Does the response directly address the query?
-    2. Completeness: Does it cover all aspects of the question?
-    3. Accuracy: Is the information provided correct and well-supported?
-    4. Clarity: Is the response clear and well-structured?
+    As an expert assistant, improve the given response based on the evaluation feedback.
     
-    User Query: {query}
+    Original Query: {query}
     
-    Response to Evaluate: {response}
+    Original Response: {response}
     
-    Provide your evaluation in JSON format with the following structure:
-    - evaluation_score: number between 0 and 1
-    - is_satisfactory: boolean
-    - reasoning: brief explanation of your evaluation
-    - improvement_suggestions: list of specific suggestions
+    Improvement Suggestions:
+    {suggestions}
     
-    Focus on being objective and constructive in your assessment.
+    Create an improved response that:
+    1. Addresses all improvement suggestions
+    2. Maintains accuracy and relevance
+    3. Improves clarity and completeness
+    4. Preserves any correct information from the original response
+    
+    Return a JSON object with:
+    - improved_response: the enhanced response
+    - changes_made: list of specific improvements implemented
+    - confidence_score: number between 0 and 1 indicating confidence in improvements
+    
+    Focus on meaningful improvements while maintaining natural language flow.
     """)
     
-    # Create JSON output parser with expected schema
+    # Create JSON output parser
     output_parser = JsonOutputParser()
     
     # Create the chain
     chain = (
         {
             "query": RunnablePassthrough(),
-            "response": lambda x: str(x["response"])
+            "response": lambda x: str(x["response"]),
+            "suggestions": lambda x: str(x["suggestions"])
         }
         | prompt
         | llm
@@ -44,39 +47,83 @@ def create_evaluation_chain(llm: ChatOpenAI = ChatOpenAI()):
     
     return chain
 
-def evaluate_response(query: str, response: str) -> Dict:
+def create_combined_correction_chain(llm: ChatOpenAI = ChatOpenAI()):
+    """Creates a chain that combines evaluation and correction"""
+    from your_evaluation_file import evaluate_response  # Import the evaluation function
+    
+    async def process_evaluation(inputs: Dict) -> Dict:
+        """Process evaluation results and add to inputs"""
+        evaluation = evaluate_response(inputs["query"], inputs["response"])
+        inputs["suggestions"] = evaluation["improvement_suggestions"]
+        return inputs
+    
+    correction_chain = create_correction_chain(llm)
+    
+    # Combine evaluation and correction
+    combined_chain = (
+        RunnablePassthrough.assign(
+            evaluation_results=process_evaluation
+        )
+        | correction_chain
+    )
+    
+    return combined_chain
+
+def correct_response(
+    query: str,
+    response: str,
+    suggestions: List[str] = None
+) -> Dict:
     """
-    Evaluate the quality and relevance of a response to a user query.
+    Generate an improved response based on evaluation feedback.
     
     Args:
-        query: The original user query
-        response: The response to evaluate
-        
+        query: Original user query
+        response: Original response
+        suggestions: Optional list of improvement suggestions. 
+                   If None, will run evaluation to get suggestions.
+    
     Returns:
-        Dict: Evaluation results with score, reasoning, and suggestions
+        Dict containing improved response and metadata
     """
     # Initialize the chain
-    evaluation_chain = create_evaluation_chain()
+    if suggestions:
+        # Use provided suggestions
+        correction_chain = create_correction_chain()
+        corrected = correction_chain.invoke({
+            "query": query,
+            "response": response,
+            "suggestions": suggestions
+        })
+    else:
+        # Run full evaluation + correction
+        combined_chain = create_combined_correction_chain()
+        corrected = combined_chain.invoke({
+            "query": query,
+            "response": response
+        })
     
-    # Run evaluation
-    evaluation_result = evaluation_chain.invoke({
-        "query": query,
-        "response": response
-    })
-    
-    return evaluation_result
+    return corrected
 
 # Example usage
 if __name__ == "__main__":
-    # Sample query and response
-    sample_query = "What are the main differences between Python 2 and Python 3?"
-    sample_response = """
-    Python 3 introduced several major changes:
-    1. Print is now a function rather than a statement
-    2. Unicode strings are default
-    3. Division of integers returns float by default
-    """
+    # Sample data
+    sample_query = "What causes climate change?"
+    sample_response = "Climate change is caused by greenhouse gases."
+    sample_suggestions = [
+        "Add specific examples of greenhouse gases",
+        "Explain the greenhouse effect mechanism",
+        "Include human activities' impact",
+        "Add scientific consensus"
+    ]
     
-    # Run evaluation
-    evaluation = evaluate_response(sample_query, sample_response)
-    print("Evaluation results:", evaluation)
+    # Get improved response
+    improved = correct_response(
+        query=sample_query,
+        response=sample_response,
+        suggestions=sample_suggestions
+    )
+    
+    print("Improved response:", improved["improved_response"])
+    print("\nChanges made:", improved["changes_made"])
+    print("\nConfidence score:", improved["confidence_score"])
