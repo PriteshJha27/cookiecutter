@@ -1,69 +1,68 @@
-import os
 import pandas as pd
-from dotenv import load_dotenv, find_dotenv
-from config import global_config
 
 
-class DataLoader:
+class Preprocessor:
     def __init__(self):
-        # Load environment variables from `.env` file
-        load_dotenv(find_dotenv())
-        self.asset_path = global_config["paths"]["asset_path"]
+        pass
 
-    def load_parquet_files(self):
+    def filter_tables(self, df_table, list_of_tables):
         """
-        Loads table and column metadata from parquet files.
+        Filters the table metadata to include only the relevant tables.
         """
-        print("Loading parquet files...")
-        try:
-            df_table = pd.read_parquet(os.path.join(self.asset_path, "cstone_table_metadata.parquet"))
-            df_column = pd.read_parquet(os.path.join(self.asset_path, "cstone_column_metadata.parquet"))
-            return df_table, df_column
-        except FileNotFoundError as e:
-            raise FileNotFoundError(f"Error loading parquet files: {e}")
-        except Exception as e:
-            raise Exception(f"Unexpected error while loading parquet files: {e}")
+        print("Filtering tables based on the list of tables...")
+        filtered_table = df_table[df_table["table_name"].isin(list_of_tables)]
+        return filtered_table
 
-    def load_excel_files(self):
+    def merge_metadata(self, df_table, df_col, df_cru_meta, df_proprietary_tables):
         """
-        Loads Excel files for CRU metadata and proprietary tables.
+        Merges table, column, and additional metadata into a unified DataFrame.
         """
-        print("Loading Excel files...")
-        try:
-            df_cru_meta = pd.read_excel(os.path.join(self.asset_path, "CRU_meta.xlsx"))
-            df_proprietary_tables = pd.read_excel(os.path.join(self.asset_path, "proprietary_tables.xlsx"))
-            return df_cru_meta, df_proprietary_tables
-        except FileNotFoundError as e:
-            raise FileNotFoundError(f"Error loading Excel files: {e}")
-        except Exception as e:
-            raise Exception(f"Unexpected error while loading Excel files: {e}")
+        print("Merging table and column metadata...")
+        merged_df = df_table.merge(df_col, on="table_name", how="outer")
+        
+        # Merging with CRU metadata and proprietary tables
+        print("Adding CRU metadata and proprietary tables...")
+        additional_metadata = pd.concat([df_proprietary_tables, df_cru_meta], axis=0, ignore_index=True)
+        combined_df = pd.concat([merged_df, additional_metadata], axis=0, ignore_index=True)
+        
+        return combined_df
 
-    def load_csv_files(self):
+    def process_key_columns(self, df, key_cols_column="key_cols", partition_cols_column="partition_cols"):
         """
-        Loads the foreign key mapping from a CSV file.
+        Processes key and partition columns, creating a unified representation.
         """
-        print("Loading CSV files...")
-        try:
-            df_foreign_keys = pd.read_csv(os.path.join(self.asset_path, "foreign_key.csv"))
-            return df_foreign_keys
-        except FileNotFoundError as e:
-            raise FileNotFoundError(f"Error loading CSV files: {e}")
-        except Exception as e:
-            raise Exception(f"Unexpected error while loading CSV files: {e}")
+        print("Processing key and partition columns...")
+        key_cols = df[key_cols_column].fillna("").apply(lambda x: x.split(","))
+        partition_cols = df[partition_cols_column].fillna("").apply(lambda x: x.split(","))
+        
+        # Combine key and partition columns
+        keys_df = pd.concat([key_cols, partition_cols], axis=1, ignore_index=True)
+        keys_df.columns = ["key_cols", "partition_cols"]
+        df_keys = pd.concat([df, pd.DataFrame(keys_df)], axis=1)
+        
+        return df_keys
 
-    def load_all_data(self):
+    def merge_foreign_keys(self, df_keys, df_foreign_keys):
         """
-        Loads all required data files (parquet, Excel, and CSV).
+        Adds foreign key information by merging with foreign keys metadata.
         """
-        print("Loading all data...")
-        df_table, df_column = self.load_parquet_files()
-        df_cru_meta, df_proprietary_tables = self.load_excel_files()
-        df_foreign_keys = self.load_csv_files()
+        print("Merging with foreign key metadata...")
+        foreign_keys_combined = df_keys.merge(df_foreign_keys, how="left", left_on="table_name", right_on="table_name")
+        return foreign_keys_combined
 
-        return {
-            "table_metadata": df_table,
-            "column_metadata": df_column,
-            "cru_metadata": df_cru_meta,
-            "proprietary_tables": df_proprietary_tables,
-            "foreign_keys": df_foreign_keys,
-        }
+    def process_foreign_key_columns(self, foreign_keys_df):
+        """
+        Processes foreign keys, creating a dictionary mapping table-column relationships.
+        """
+        print("Processing foreign key table-column dictionary...")
+        foreign_key_selected = foreign_keys_df[["table1", "column1", "table2", "column2"]]
+        foreign_key_selected.columns = ["table", "column", "foreign_table", "foreign_column"]
+        
+        # Create a foreign key dictionary
+        foreign_key_dict = (
+            foreign_key_selected.groupby("table")["column"]
+            .apply(list)
+            .to_dict()
+        )
+        
+        return foreign_key_dict
