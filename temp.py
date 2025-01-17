@@ -1,88 +1,135 @@
-import torch
-from transformers import AutoTokenizer, AutoModel
-from typing import List
+def generate_instruction_prompt():
+    """
+    Generates a generic instruction prompt for SQL generation.
+    Returns:
+        str: Instruction prompt string.
+    """
+    instruction_prompt = """
+    **Instruction**:
+    - Generate a Hive SQL query step by step based on the given schema and user question.
+    - Ensure the query structure is valid and uses relevant tables and columns.
+    - Provide reasoning for the chosen tables, columns, and joins.
+    """
+    return instruction_prompt
 
 
-class EmbeddingGenerator:
-    def __init__(self, model_path: str):
-        """
-        Initializes the embedding generator with a Hugging Face model.
-        Args:
-            model_path (str): Path to the pre-trained Hugging Face model.
-        """
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
-        self.model = AutoModel.from_pretrained(model_path)
-
-    def mean_pooling(self, model_output, attention_mask):
-        """
-        Performs mean pooling of token embeddings, considering attention mask.
-        """
-        token_embeddings = model_output[0]  # First element is token embeddings
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-        return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-
-    def generate_embeddings(self, sentences: List[str]) -> torch.Tensor:
-        """
-        Generates sentence embeddings for a list of sentences.
-        Args:
-            sentences (List[str]): List of input sentences.
-        Returns:
-            torch.Tensor: Normalized sentence embeddings.
-        """
-        print("Generating embeddings...")
-        # Tokenize inputs
-        encoded_input = self.tokenizer(sentences, padding=True, truncation=True, return_tensors="pt", max_length=2048)
-
-        # Compute token embeddings
-        with torch.no_grad():
-            model_output = self.model(**encoded_input)
-
-        # Perform mean pooling
-        sentence_embeddings = self.mean_pooling(model_output, encoded_input["attention_mask"])
-
-        # Normalize embeddings
-        sentence_embeddings = torch.nn.functional.normalize(sentence_embeddings, p=2, dim=1)
-        return sentence_embeddings
+def generate_few_shot_example_prompt(few_shot_examples=None):
+    """
+    Generates a few-shot example prompt for guiding the model.
+    Args:
+        few_shot_examples (list): List of few-shot examples, if available.
+    Returns:
+        str: Few-shot example prompt string.
+    """
+    examples = few_shot_examples if few_shot_examples else []
+    return f"""
+    **Few-Shot Examples**:
+    {examples}
+    """
 
 
-import faiss
-import numpy as np
-from typing import List
+def generate_comment_prompt(question, knowledge=None):
+    """
+    Generates a prompt with user query and additional knowledge context.
+    Args:
+        question (str): User query or question.
+        knowledge (str, optional): Additional domain knowledge or context.
+    Returns:
+        str: Combined comment prompt string.
+    """
+    knowledge_prompt = f"**Knowledge**: {knowledge}" if knowledge else ""
+    combined_prompt = f"""
+    **Question**: {question}
+    {knowledge_prompt}
+    """
+    return combined_prompt
 
 
-class IndexSaver:
-    def __init__(self, vectorstore_path: str, embedding_dimension: int = 768):
-        """
-        Initializes the FAISS index saver.
-        Args:
-            vectorstore_path (str): Path to save the FAISS index.
-            embedding_dimension (int): Dimension of the embeddings.
-        """
-        self.vectorstore_path = vectorstore_path
-        self.embedding_dimension = embedding_dimension
-        self.index = faiss.IndexFlatL2(self.embedding_dimension)
+def cru_instruction_prompt():
+    """
+    Generates a CRU-specific instruction prompt for SQL generation.
+    Returns:
+        str: CRU instruction prompt string.
+    """
+    return """
+    **CRU Domain Knowledge**:
+    - Include CRU-specific details in the query generation.
+    """
 
-    def save_embeddings_to_index(self, embeddings: List[np.ndarray], save_name: str = "index.faiss"):
-        """
-        Adds embeddings to the FAISS index and saves it.
-        Args:
-            embeddings (List[np.ndarray]): List of embeddings to save.
-            save_name (str): Name of the saved FAISS index file.
-        """
-        print("Saving embeddings to FAISS index...")
-        all_embeddings = np.vstack(embeddings).astype("float32")
-        self.index.add(all_embeddings)
-        save_dir = f"{self.vectorstore_path}/{save_name}"
-        faiss.write_index(self.index, save_dir)
-        print(f"FAISS index saved at: {save_dir}")
 
-    def load_index(self, index_name: str = "index.faiss"):
-        """
-        Loads an existing FAISS index.
-        Args:
-            index_name (str): Name of the FAISS index file to load.
-        Returns:
-            faiss.Index: Loaded FAISS index.
-        """
-        print(f"Loading FAISS index from {self.vectorstore_path}/{index_name}...")
-        return faiss.read_index(f"{self.vectorstore_path}/{index_name}")
+def generate_cot_prompt():
+    """
+    Generates a "chain-of-thought" (CoT) prompt for step-by-step SQL reasoning.
+    Returns:
+        str: CoT prompt string.
+    """
+    cot_prompt = """
+    Generate the Hive SQL query step by step. Below I provide an example:
+    - Identify the required tables from the schema.
+    - Select relevant columns for filtering, grouping, and aggregations.
+    - Ensure valid joins and conditions based on the schema relationships.
+    """
+    return cot_prompt
+
+
+def generate_schema_prompt_all(table_schema, keyword_results, foreign_key_table_column_dict=True):
+    """
+    Generates a schema-based prompt with table schema and keywords.
+    Args:
+        table_schema (str): Schema details in string format.
+        keyword_results (dict): Results with relevant tables and keywords.
+        foreign_key_table_column_dict (bool): Whether to include foreign key relationships.
+    Returns:
+        str: Schema prompt string.
+    """
+    return f"""
+    **Schema Information**:
+    Below is the table schema related to the question:
+    **Database Info**:
+    {table_schema}
+
+    On searching through the schema, the following tables came out to be most significant:
+    {keyword_results}
+    """
+
+
+def generate_combined_prompts_one(
+    question,
+    schema,
+    keyword_results,
+    few_shot_examples=None,
+    knowledge=None,
+    foreign_key_table_column_dict=None,
+):
+    """
+    Combines all the generated prompts into one comprehensive prompt.
+    Args:
+        question (str): User query or question.
+        schema (str): Schema details in string format.
+        keyword_results (dict): Results with relevant tables and keywords.
+        few_shot_examples (list, optional): Few-shot examples, if available.
+        knowledge (str, optional): Additional domain knowledge or context.
+        foreign_key_table_column_dict (bool, optional): Foreign key relationships.
+    Returns:
+        str: Combined prompt string.
+    """
+    few_shot_prompt = generate_few_shot_example_prompt(few_shot_examples) if few_shot_examples else ""
+    schema_prompt = generate_schema_prompt_all(schema, keyword_results, foreign_key_table_column_dict)
+    cot_prompt = generate_cot_prompt()
+    instruction_prompt = generate_instruction_prompt()
+    comment_prompt = generate_comment_prompt(question, knowledge)
+    cru_prompt = cru_instruction_prompt()
+
+    combined_prompts = "\n\n".join(
+        [
+            "Given a database schema, question, and knowledge, generate the correct Hive SQL query for the question.",
+            few_shot_prompt,
+            cot_prompt,
+            schema_prompt,
+            comment_prompt,
+            cru_prompt,
+            instruction_prompt,
+        ]
+    )
+
+    return combined_prompts
