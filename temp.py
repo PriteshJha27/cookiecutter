@@ -1,68 +1,55 @@
 import pandas as pd
 
 
-class Preprocessor:
+class SchemaLinker:
     def __init__(self):
         pass
 
-    def filter_tables(self, df_table, list_of_tables):
+    def create_schema_documents(self, df):
         """
-        Filters the table metadata to include only the relevant tables.
+        Creates schema metadata documents from a given DataFrame.
+        
+        Args:
+            df (pd.DataFrame): DataFrame containing schema metadata.
+        
+        Returns:
+            List[dict]: List of schema documents.
         """
-        print("Filtering tables based on the list of tables...")
-        filtered_table = df_table[df_table["table_name"].isin(list_of_tables)]
-        return filtered_table
+        print("Creating schema documents...")
+        documents = []
+        for _, row in df.iterrows():
+            document = {
+                "metadata": {
+                    "dataset": row["dataset"],
+                    "table_name": row["table_name"],
+                    "table_description": row["table_description"],
+                    "business_name": row["business_name"],
+                    "column_name": row["column_name"],
+                    "column_description": row["column_description"],
+                    "key_cols": row["key_cols"],
+                    "partition_cols": row["partition_cols"],
+                }
+            }
+            documents.append(document)
+        return documents
 
-    def merge_metadata(self, df_table, df_col, df_cru_meta, df_proprietary_tables):
+    def split_large_documents(self, documents, max_length=1100):
         """
-        Merges table, column, and additional metadata into a unified DataFrame.
-        """
-        print("Merging table and column metadata...")
-        merged_df = df_table.merge(df_col, on="table_name", how="outer")
+        Splits documents that exceed a certain length into smaller chunks.
         
-        # Merging with CRU metadata and proprietary tables
-        print("Adding CRU metadata and proprietary tables...")
-        additional_metadata = pd.concat([df_proprietary_tables, df_cru_meta], axis=0, ignore_index=True)
-        combined_df = pd.concat([merged_df, additional_metadata], axis=0, ignore_index=True)
+        Args:
+            documents (List[dict]): List of schema documents.
+            max_length (int): Maximum length of each document.
         
-        return combined_df
-
-    def process_key_columns(self, df, key_cols_column="key_cols", partition_cols_column="partition_cols"):
+        Returns:
+            List[dict]: List of smaller schema documents.
         """
-        Processes key and partition columns, creating a unified representation.
-        """
-        print("Processing key and partition columns...")
-        key_cols = df[key_cols_column].fillna("").apply(lambda x: x.split(","))
-        partition_cols = df[partition_cols_column].fillna("").apply(lambda x: x.split(","))
-        
-        # Combine key and partition columns
-        keys_df = pd.concat([key_cols, partition_cols], axis=1, ignore_index=True)
-        keys_df.columns = ["key_cols", "partition_cols"]
-        df_keys = pd.concat([df, pd.DataFrame(keys_df)], axis=1)
-        
-        return df_keys
-
-    def merge_foreign_keys(self, df_keys, df_foreign_keys):
-        """
-        Adds foreign key information by merging with foreign keys metadata.
-        """
-        print("Merging with foreign key metadata...")
-        foreign_keys_combined = df_keys.merge(df_foreign_keys, how="left", left_on="table_name", right_on="table_name")
-        return foreign_keys_combined
-
-    def process_foreign_key_columns(self, foreign_keys_df):
-        """
-        Processes foreign keys, creating a dictionary mapping table-column relationships.
-        """
-        print("Processing foreign key table-column dictionary...")
-        foreign_key_selected = foreign_keys_df[["table1", "column1", "table2", "column2"]]
-        foreign_key_selected.columns = ["table", "column", "foreign_table", "foreign_column"]
-        
-        # Create a foreign key dictionary
-        foreign_key_dict = (
-            foreign_key_selected.groupby("table")["column"]
-            .apply(list)
-            .to_dict()
-        )
-        
-        return foreign_key_dict
+        print("Splitting large schema documents...")
+        short_docs = []
+        for doc in documents:
+            if len(doc) > max_length:
+                # Truncate to max_length if needed (example logic for simplicity)
+                short_docs.append(doc[:max_length])
+            else:
+                short_docs.append(doc)
+        return short_docs
