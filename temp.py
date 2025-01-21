@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 class SearchResult:
     path: List[str]
     similarity_score: float
+    connection_details: dict  # Added to store connection info
 
 class PathState(NamedTuple):
     node: str
@@ -19,35 +20,68 @@ class PathState(NamedTuple):
 class CosineGraphSearch:
     def __init__(self, triplets: List[Tuple[str, str, str]]):
         self.graph = nx.DiGraph()
+        self.triplets = triplets
         self._build_graph(triplets)
-        self.node_vectors = self._create_node_vectors()
+        self.node_vectors, self.feature_names = self._create_node_vectors()
 
     def _build_graph(self, triplets: List[Tuple[str, str, str]]) -> None:
-        """Build graph from triplets"""
+        """Build graph from triplets and store predicates"""
         for subj, pred, obj in triplets:
             self.graph.add_edge(subj, obj, predicate=pred)
 
-    def _create_node_vectors(self) -> dict:
+    def _create_node_vectors(self) -> tuple:
         """
-        Create vector representations for nodes based on their connections
-        Using adjacency patterns as features
+        Create enhanced vector representations for nodes based on their connections
+        and predicates
         """
+        # Collect all unique nodes and predicates
         nodes = list(self.graph.nodes())
-        n = len(nodes)
-        node_to_idx = {node: i for i, node in enumerate(nodes)}
-        vectors = defaultdict(lambda: np.zeros(n * 2))  # *2 for in and out connections
+        predicates = list(set(data['predicate'] for _, _, data in self.graph.edges(data=True)))
+        
+        # Create feature names for better interpretation
+        feature_names = []
+        for pred in predicates:
+            feature_names.extend([f"out_{pred}", f"in_{pred}"])
+        
+        n_features = len(predicates) * 2
+        vectors = defaultdict(lambda: np.zeros(n_features))
 
-        # Create vectors based on connection patterns
+        # Create vectors based on both connections and predicates
         for node in nodes:
-            idx = node_to_idx[node]
-            # Incoming connections
-            for pred in self.graph.predecessors(node):
-                vectors[node][node_to_idx[pred]] = 1
-            # Outgoing connections
-            for succ in self.graph.successors(node):
-                vectors[node][node_to_idx[succ] + n] = 1
+            # Outgoing edges
+            for _, neighbor, data in self.graph.out_edges(node, data=True):
+                pred_idx = predicates.index(data['predicate'])
+                vectors[node][pred_idx * 2] += 1
 
-        return vectors
+            # Incoming edges
+            for neighbor, _, data in self.graph.in_edges(node, data=True):
+                pred_idx = predicates.index(data['predicate'])
+                vectors[node][pred_idx * 2 + 1] += 1
+
+        return vectors, feature_names
+
+    def get_node_connections(self, node: str) -> dict:
+        """Get detailed connection information for a node"""
+        connections = {
+            'outgoing': [],
+            'incoming': []
+        }
+        
+        # Outgoing connections
+        for _, neighbor, data in self.graph.out_edges(node, data=True):
+            connections['outgoing'].append({
+                'node': neighbor,
+                'predicate': data['predicate']
+            })
+        
+        # Incoming connections
+        for neighbor, _, data in self.graph.in_edges(node, data=True):
+            connections['incoming'].append({
+                'node': neighbor,
+                'predicate': data['predicate']
+            })
+        
+        return connections
 
     def cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
         """Calculate cosine similarity between two vectors"""
@@ -57,145 +91,66 @@ class CosineGraphSearch:
             return 0
         return np.dot(vec1, vec2) / (norm1 * norm2)
 
-    def dfs_with_cosine(self, 
-                       start_node: str,
-                       target_vector: np.ndarray,
-                       similarity_threshold: float = 0.1,
-                       max_depth: int = 5,
-                       max_results: int = 10) -> List[SearchResult]:
-        """
-        Perform DFS using cosine similarity to guide the search
-        """
-        results = []
-        visited_paths = set()
-        paths_queue = []
-
-        # Initialize with start node
-        start_similarity = self.cosine_similarity(
-            self.node_vectors[start_node],
-            target_vector
-        )
-        
-        heapq.heappush(paths_queue, PathState(
-            node=start_node,
-            path=[start_node],
-            score=-start_similarity  # Negative for max heap
-        ))
-
-        while paths_queue and len(results) < max_results:
-            current_state = heapq.heappop(paths_queue)
-            current_node = current_state.node
-            current_path = current_state.path
-
-            path_key = tuple(current_path)
-            if path_key in visited_paths or len(current_path) > max_depth:
-                continue
-
-            visited_paths.add(path_key)
-            similarity = -current_state.score  # Convert back to positive
-
-            if similarity >= similarity_threshold:
-                results.append(SearchResult(
-                    path=current_path,
-                    similarity_score=similarity
-                ))
-
-            # Explore neighbors
-            for neighbor in self.graph.neighbors(current_node):
-                if neighbor not in current_path:  # Avoid cycles
-                    neighbor_vector = self.node_vectors[neighbor]
-                    neighbor_similarity = self.cosine_similarity(
-                        neighbor_vector,
-                        target_vector
-                    )
-                    
-                    if neighbor_similarity >= similarity_threshold:
-                        heapq.heappush(paths_queue, PathState(
-                            node=neighbor,
-                            path=current_path + [neighbor],
-                            score=-neighbor_similarity  # Negative for max heap
-                        ))
-
-        return sorted(results, key=lambda x: x.similarity_score, reverse=True)
-
     def find_similar_paths(self, 
                          query_node: str, 
-                         similarity_threshold: float = 0.1,
-                         max_depth: int = 5,
+                         similarity_threshold: float = 0.01,  # Lowered threshold
+                         max_depth: int = 3,
                          max_results: int = 10) -> List[SearchResult]:
-        """
-        Find paths similar to the query node's connection pattern
-        """
+        """Find paths similar to the query node's connection pattern"""
         query_vector = self.node_vectors[query_node]
+        query_connections = self.get_node_connections(query_node)
         
         all_results = []
         for start_node in self.graph.nodes():
             if start_node != query_node:
-                results = self.dfs_with_cosine(
-                    start_node=start_node,
-                    target_vector=query_vector,
-                    similarity_threshold=similarity_threshold,
-                    max_depth=max_depth,
-                    max_results=max_results
+                similarity = self.cosine_similarity(
+                    self.node_vectors[start_node],
+                    query_vector
                 )
-                all_results.extend(results)
+                
+                if similarity >= similarity_threshold:
+                    connections = self.get_node_connections(start_node)
+                    all_results.append(SearchResult(
+                        path=[start_node],
+                        similarity_score=similarity,
+                        connection_details=connections
+                    ))
 
-        # Sort and return top results
-        return sorted(all_results, 
-                     key=lambda x: x.similarity_score, 
-                     reverse=True)[:max_results]
+        # Sort results by similarity score
+        return sorted(all_results, key=lambda x: x.similarity_score, reverse=True)[:max_results]
 
-    def visualize_results(self, results: List[SearchResult]) -> None:
-        """Visualize the search results"""
-        pos = nx.spring_layout(self.graph)
-        plt.figure(figsize=(15, 10))
-        
-        # Draw all nodes and edges in light gray
-        nx.draw_networkx_nodes(self.graph, pos, node_color='lightgray', 
-                             node_size=500, alpha=0.3)
-        nx.draw_networkx_edges(self.graph, pos, edge_color='lightgray', alpha=0.3)
-        nx.draw_networkx_labels(self.graph, pos, alpha=0.3)
-        
-        # Highlight paths from results
-        colors = ['r', 'g', 'b', 'c', 'm']
-        
-        for idx, result in enumerate(results[:5]):
-            color = colors[idx % len(colors)]
-            path = result.path
-            
-            # Draw nodes in path
-            nx.draw_networkx_nodes(
-                self.graph, pos,
-                nodelist=path,
-                node_color=color,
-                node_size=800,
-                alpha=0.6
-            )
-            
-            # Draw edges in path
-            path_edges = [(path[i], path[i+1]) for i in range(len(path)-1)]
-            nx.draw_networkx_edges(
-                self.graph, pos,
-                edgelist=path_edges,
-                edge_color=color,
-                width=2,
-                alpha=0.6
-            )
-            
-            # Add similarity score
-            plt.annotate(
-                f'Score: {result.similarity_score:.2f}',
-                xy=pos[path[0]],
-                xytext=(10, 10),
-                textcoords='offset points',
-                bbox=dict(facecolor='white', edgecolor=color, alpha=0.6)
-            )
-        
-        plt.title("Search Results")
-        plt.axis('off')
-        plt.show()
+    def print_vector_details(self, node: str):
+        """Print detailed vector representation for a node"""
+        vector = self.node_vectors[node]
+        print(f"\nVector details for node '{node}':")
+        for i, value in enumerate(vector):
+            if value > 0:
+                print(f"{self.feature_names[i]}: {value}")
 
-# Example usage
+    def print_comparison(self, node1: str, node2: str):
+        """Print detailed comparison between two nodes"""
+        vec1 = self.node_vectors[node1]
+        vec2 = self.node_vectors[node2]
+        similarity = self.cosine_similarity(vec1, vec2)
+        
+        print(f"\nComparison between '{node1}' and '{node2}':")
+        print(f"Similarity score: {similarity:.3f}")
+        
+        print(f"\n{node1} connections:")
+        connections1 = self.get_node_connections(node1)
+        for direction in ['outgoing', 'incoming']:
+            print(f"  {direction.capitalize()}:")
+            for conn in connections1[direction]:
+                print(f"    -> {conn['predicate']} -> {conn['node']}")
+        
+        print(f"\n{node2} connections:")
+        connections2 = self.get_node_connections(node2)
+        for direction in ['outgoing', 'incoming']:
+            print(f"  {direction.capitalize()}:")
+            for conn in connections2[direction]:
+                print(f"    -> {conn['predicate']} -> {conn['node']}")
+
+# Example usage with debugging information
 if __name__ == "__main__":
     # Example triplets
     triplets = [
@@ -217,19 +172,33 @@ if __name__ == "__main__":
     # Initialize search
     search = CosineGraphSearch(triplets)
     
-    # Find paths similar to John's connection pattern
+    # Print all nodes and their vector representations
+    print("Node vector details:")
+    for node in search.graph.nodes():
+        search.print_vector_details(node)
+    
+    # Find similar patterns to John's connections
+    print("\nFinding patterns similar to John's connections...")
     results = search.find_similar_paths(
         query_node="John",
-        similarity_threshold=0.1,
-        max_depth=4,
+        similarity_threshold=0.01,  # Lowered threshold for testing
+        max_depth=3,
         max_results=5
     )
     
-    # Print results
-    print("\nSimilar paths to John's pattern:")
-    for i, result in enumerate(results, 1):
-        print(f"\nPath {i} (Similarity: {result.similarity_score:.3f}):")
-        print(" -> ".join(result.path))
+    # Print detailed results
+    print("\nSearch Results:")
+    if not results:
+        print("No results found. Try adjusting the similarity threshold.")
+    else:
+        for i, result in enumerate(results, 1):
+            print(f"\nResult {i} (Similarity: {result.similarity_score:.3f}):")
+            print("Node:", result.path[0])
+            print("Connection details:")
+            for direction in ['outgoing', 'incoming']:
+                print(f"  {direction.capitalize()}:")
+                for conn in result.connection_details[direction]:
+                    print(f"    -> {conn['predicate']} -> {conn['node']}")
     
-    # Visualize results
-    search.visualize_results(results)
+    # Print detailed comparison between John and Mary (who should have similar patterns)
+    search.print_comparison("John", "Mary")
