@@ -1,4 +1,3 @@
-
 from typing import List, Tuple
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
@@ -13,6 +12,9 @@ class KGTriplet(BaseModel):
     def to_tuple(self) -> Tuple[str, str, str]:
         return (self.subject, self.predicate, self.object)
 
+class KGTripletList(BaseModel):
+    triplets: List[KGTriplet] = Field(description="List of knowledge graph triplets")
+
 class TextToKGProcessor:
     def __init__(self, api_key: str):
         self.llm = ChatOpenAI(
@@ -20,33 +22,42 @@ class TextToKGProcessor:
             temperature=0,
             api_key=api_key
         )
-        self.parser = PydanticOutputParser(pydantic_object=KGTriplet)
+        self.parser = PydanticOutputParser(pydantic_object=KGTripletList)
         
         self.prompt = PromptTemplate(
-            template="""Extract a knowledge graph triplet from the following text chunk.
-            The output should be in the format (subject, predicate, object).
+            template="""Extract ALL possible knowledge graph triplets from the following text chunk.
+            Generate as many meaningful triplets as you can find in the text.
+            Each triplet should be in the format (subject, predicate, object).
             
             Text chunk: {text}
             
             {format_instructions}
+            
+            Remember to:
+            1. Break down complex sentences into multiple triplets
+            2. Include implicit relationships
+            3. Extract both direct and indirect relationships
+            4. Consider attributes and properties as separate triplets
             """,
             input_variables=["text"],
             partial_variables={"format_instructions": self.parser.get_format_instructions()}
         )
         
-    def process_chunk(self, text: str) -> KGTriplet:
+    def process_chunk(self, text: str) -> List[Tuple[str, str, str]]:
         chain = self.prompt | self.llm | self.parser
-        return chain.invoke({"text": text})
+        try:
+            result = chain.invoke({"text": text})
+            return [triplet.to_tuple() for triplet in result.triplets]
+        except Exception as e:
+            print(f"Error processing chunk: {e}")
+            return []
     
     def process_chunks(self, chunks: List[str]) -> List[Tuple[str, str, str]]:
-        triplets = []
+        all_triplets = []
         for chunk in chunks:
-            try:
-                kg_triplet = self.process_chunk(chunk)
-                triplets.append(kg_triplet.to_tuple())
-            except Exception as e:
-                print(f"Error processing chunk: {e}")
-        return triplets
+            chunk_triplets = self.process_chunk(chunk)
+            all_triplets.extend(chunk_triplets)
+        return all_triplets
 
 # Example usage:
 if __name__ == "__main__":
@@ -54,11 +65,12 @@ if __name__ == "__main__":
     processor = TextToKGProcessor(api_key)
     
     text_chunks = [
-        "The cat sits on the mat.",
-        "Paris is the capital of France.",
-        "Einstein developed the theory of relativity."
+        """The large brown cat sits on the comfortable mat in the kitchen. 
+        The cat belongs to John, who bought it from a local shelter last year.""",
+        "Paris, the beautiful capital of France, attracts millions of tourists annually.",
     ]
     
     kg_triplets = processor.process_chunks(text_chunks)
+    print("Generated Knowledge Graph Triplets:")
     for triplet in kg_triplets:
-        print(f"Subject: {triplet[0]}, Predicate: {triplet[1]}, Object: {triplet[2]}")
+        print(f"({triplet[0]}, {triplet[1]}, {triplet[2]})")
