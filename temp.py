@@ -202,3 +202,332 @@ class HyDEGenerator(LLMService):
 
 
 
+############################################################################################################
+
+# utils/config_management.py
+import os
+import yaml
+import logging
+from typing import Dict, Any
+from pathlib import Path
+from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
+
+class ConfigValidator:
+    """Validates configuration settings."""
+    
+    @staticmethod
+    def validate_paths(config: Dict[str, Any]) -> None:
+        """Validate all paths in configuration exist."""
+        required_paths = [
+            config['vectorstore']['vectorstore_path'],
+            config['vectorstore']['index_save_path'],
+            config['data']['data_folder']
+        ]
+        
+        for path in required_paths:
+            if not os.path.exists(path):
+                raise ValueError(f"Required path does not exist: {path}")
+
+    @staticmethod
+    def validate_model_config(config: Dict[str, Any]) -> None:
+        """Validate model configuration."""
+        valid_models = ['gpt', 'llama']
+        if config['llm']['model'] not in valid_models:
+            raise ValueError(f"Invalid model type. Must be one of {valid_models}")
+
+    @staticmethod
+    def validate_vectorstore_config(config: Dict[str, Any]) -> None:
+        """Validate vector store configuration."""
+        valid_stores = ['faiss', 'datastax']
+        if not all(store in valid_stores for store in config['vectorstore']['storename']):
+            raise ValueError(f"Invalid vector store. Must be one of {valid_stores}")
+
+class ConfigLoader:
+    """Handles configuration loading and environment setup."""
+    
+    def __init__(self, config_path: str = None):
+        self.config_path = config_path or os.getenv('CONFIG_PATH', 'config/config.yaml')
+        self.validator = ConfigValidator()
+        self._load_environment()
+
+    def _load_environment(self) -> None:
+        """Load environment variables."""
+        env_file = os.getenv('ENV_FILE', '.env')
+        if os.path.exists(env_file):
+            load_dotenv(env_file)
+            logger.info(f"Loaded environment from {env_file}")
+
+    def _read_yaml(self) -> Dict[str, Any]:
+        """Read and parse YAML configuration file."""
+        try:
+            with open(self.config_path, 'r') as file:
+                config = yaml.safe_load(file)
+                logger.info(f"Successfully loaded configuration from {self.config_path}")
+                return config
+        except Exception as e:
+            logger.error(f"Error loading configuration: {e}")
+            raise
+
+    def load_and_validate(self) -> Dict[str, Any]:
+        """Load and validate configuration."""
+        config = self._read_yaml()
+        
+        try:
+            self.validator.validate_paths(config)
+            self.validator.validate_model_config(config)
+            self.validator.validate_vectorstore_config(config)
+            return config
+        except Exception as e:
+            logger.error(f"Configuration validation failed: {e}")
+            raise
+
+def load_config() -> Dict[str, Any]:
+    """Utility function to load configuration."""
+    loader = ConfigLoader()
+    return loader.load_and_validate()
+
+############################################################################################################
+
+
+# orchestrators/base.py
+from abc import ABC, abstractmethod
+from typing import Any, Dict
+import logging
+
+logger = logging.getLogger(__name__)
+
+class BaseOrchestrator(ABC):
+    """Base class for all orchestrators."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self._validate_config()
+
+    @abstractmethod
+    def _validate_config(self) -> None:
+        """Validate orchestrator-specific configuration."""
+        pass
+
+    @abstractmethod
+    def execute(self) -> Any:
+        """Execute the orchestrator's main function."""
+        pass
+
+# orchestrators/data_loader.py
+from typing import Dict, Any
+from src.indexing.data_loader import DataLoader
+import logging
+
+logger = logging.getLogger(__name__)
+
+class DataLoadOrchestrator(BaseOrchestrator):
+    """Orchestrates data loading operations."""
+    
+    def _validate_config(self) -> None:
+        if not self.config.get('data', {}).get('data_folder'):
+            raise ValueError("Data folder not configured")
+
+    def execute(self) -> Dict[str, Any]:
+        """Load documents from configured source."""
+        try:
+            loader = DataLoader()
+            documents = loader.load_document()
+            logger.info(f"Successfully loaded documents from {self.config['data']['data_folder']}")
+            return documents
+        except Exception as e:
+            logger.error(f"Error loading documents: {e}")
+            raise
+
+# orchestrators/chunking.py
+from typing import Dict, Any, Tuple, List
+from src.indexing.lumos_chunking import Chunking
+import logging
+
+logger = logging.getLogger(__name__)
+
+class ChunkingOrchestrator(BaseOrchestrator):
+    """Orchestrates document chunking operations."""
+    
+    def _validate_config(self) -> None:
+        preprocessing = self.config.get('preprocessing', {})
+        if not isinstance(preprocessing.get('simple_ratio_threshold'), (int, float)):
+            raise ValueError("Invalid chunking threshold configuration")
+
+    def execute(self, documents: Dict[str, Any]) -> Tuple[List[Any], List[Any]]:
+        """Process documents into chunks."""
+        try:
+            chunking = Chunking()
+            datastax_chunks, faiss_chunks = chunking.create_chunks(data=documents)
+            logger.info(f"Created {len(faiss_chunks)} chunks for FAISS and {len(datastax_chunks)} chunks for Datastax")
+            return datastax_chunks, faiss_chunks
+        except Exception as e:
+            logger.error(f"Error during chunking: {e}")
+            raise
+
+# orchestrators/embedding.py
+from typing import Dict, Any, List
+from sentence_transformers import SentenceTransformer
+import logging
+
+logger = logging.getLogger(__name__)
+
+class EmbeddingOrchestrator(BaseOrchestrator):
+    """Orchestrates embedding generation."""
+    
+    def _validate_config(self) -> None:
+        if not self.config.get('embedding_model', {}).get('model_name'):
+            raise ValueError("Embedding model not configured")
+
+    def execute(self, chunks: List[Any]) -> List[Any]:
+        """Generate embeddings for chunks."""
+        try:
+            model = SentenceTransformer(self.config['embedding_model']['embed_model'])
+            embeddings = model.encode(chunks)
+            logger.info(f"Generated embeddings for {len(chunks)} chunks")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            raise
+
+# orchestrators/indexing.py
+from typing import Dict, Any, List
+from src.indexing.document import DocumentManager
+import logging
+
+logger = logging.getLogger(__name__)
+
+class IndexingOrchestrator(BaseOrchestrator):
+    """Orchestrates vector store indexing operations."""
+    
+    def _validate_config(self) -> None:
+        if not self.config.get('vectorstore', {}).get('storename'):
+            raise ValueError("Vector store not configured")
+
+    def execute(self, chunks: List[Any], embeddings: List[Any]) -> None:
+        """Index chunks and embeddings in vector store."""
+        try:
+            doc_manager = DocumentManager(self.config)
+            doc_manager.add_docs(chunks, embeddings)
+            
+            if self.config['vectorstore']['storename'] == 'faiss':
+                doc_manager.save_to_file(self.config['vectorstore']['index_save_path'])
+                
+            logger.info("Successfully indexed documents")
+        except Exception as e:
+            logger.error(f"Error during indexing: {e}")
+            raise
+
+############################################################################################################
+
+
+# router/indexing_router.py
+from typing import Dict, Any
+import logging
+from orchestrators.data_loader import DataLoadOrchestrator
+from orchestrators.chunking import ChunkingOrchestrator
+from orchestrators.embedding import EmbeddingOrchestrator
+from orchestrators.indexing import IndexingOrchestrator
+
+logger = logging.getLogger(__name__)
+
+class IndexingRouter:
+    """Routes and coordinates the indexing pipeline."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.data_orchestrator = DataLoadOrchestrator(config)
+        self.chunking_orchestrator = ChunkingOrchestrator(config)
+        self.embedding_orchestrator = EmbeddingOrchestrator(config)
+        self.indexing_orchestrator = IndexingOrchestrator(config)
+
+    def execute_pipeline(self) -> None:
+        """Execute the complete indexing pipeline."""
+        try:
+            # Load documents
+            logger.info("Starting document loading")
+            documents = self.data_orchestrator.execute()
+
+            # Create chunks
+            logger.info("Starting document chunking")
+            datastax_chunks, faiss_chunks = self.chunking_orchestrator.execute(documents)
+
+            # Generate embeddings
+            logger.info("Generating embeddings")
+            embeddings = self.embedding_orchestrator.execute(
+                faiss_chunks if self.config['vectorstore']['storename'] == 'faiss' else datastax_chunks
+            )
+
+            # Index documents
+            logger.info("Indexing documents")
+            self.indexing_orchestrator.execute(
+                faiss_chunks if self.config['vectorstore']['storename'] == 'faiss' else datastax_chunks,
+                embeddings
+            )
+
+            logger.info("Indexing pipeline completed successfully")
+        except Exception as e:
+            logger.error(f"Error in indexing pipeline: {e}")
+            raise
+
+# main.py
+import logging
+import sys
+from utils.config_management import load_config
+from router.indexing_router import IndexingRouter
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('indexing.log')
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+def main():
+    try:
+        # Load and validate configuration
+        config = load_config()
+        
+        # Initialize and execute indexing pipeline
+        indexing_router = IndexingRouter(config)
+        indexing_router.execute_pipeline()
+        
+    except Exception as e:
+        logger.error(f"Application failed: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+
+
+############################################################################################################
+
+
+
+
+
+############################################################################################################
+
+
+
+
+
+############################################################################################################
+
+
+
+
+
+############################################################################################################
+
+
+
+
+
+############################################################################################################
+
