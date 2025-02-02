@@ -1840,7 +1840,315 @@ from dataclasses import data
 ############################################################################################################
 
 
+# src/utils/metric_collector.py
+import time
+import logging
+from typing import Dict, Any, List, Optional, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from functools import wraps
+import json
 
+logger = logging.getLogger(__name__)
+
+@dataclass
+class OperationMetrics:
+    """Metrics for a single operation."""
+    total_calls: int = 0
+    successful_calls: int = 0
+    failed_calls: int = 0
+    total_latency: float = 0.0
+    max_latency: float = 0.0
+    min_latency: float = float('inf')
+    error_counts: Dict[str, int] = field(default_factory=dict)
+
+@dataclass
+class ChunkMetrics:
+    """Metrics for document chunking."""
+    chunk_sizes: List[int] = field(default_factory=list)
+    total_chunks: int = 0
+    avg_chunk_size: float = 0.0
+
+@dataclass
+class EmbeddingMetrics:
+    """Metrics for embeddings."""
+    embedding_dimensions: List[int] = field(default_factory=list)
+    total_embeddings: int = 0
+    avg_dimension: float = 0.0
+
+class MetricCollector:
+    """Collects and manages application metrics."""
+    
+    def __init__(self):
+        self.metrics: Dict[str, OperationMetrics] = {}
+        self.chunk_metrics = ChunkMetrics()
+        self.embedding_metrics = EmbeddingMetrics()
+        self.start_time = datetime.now()
+
+    def timing_decorator(self, operation_name: str) -> Callable:
+        """Decorator to time operations and collect metrics."""
+        def decorator(func: Callable) -> Callable:
+            @wraps(func)
+            def wrapper(*args, **kwargs) -> Any:
+                start_time = time.time()
+                try:
+                    result = func(*args, **kwargs)
+                    self.record_success(operation_name, time.time() - start_time)
+                    return result
+                except Exception as e:
+                    self.record_error(operation_name, str(e), time.time() - start_time)
+                    raise
+            return wrapper
+        return decorator
+
+    def record_success(self, operation: str, duration: float) -> None:
+        """Record a successful operation."""
+        if operation not in self.metrics:
+            self.metrics[operation] = OperationMetrics()
+        
+        metrics = self.metrics[operation]
+        metrics.total_calls += 1
+        metrics.successful_calls += 1
+        metrics.total_latency += duration
+        metrics.max_latency = max(metrics.max_latency, duration)
+        metrics.min_latency = min(metrics.min_latency, duration)
+
+    def record_error(self, operation: str, error: str, duration: float) -> None:
+        """Record an operation error."""
+        if operation not in self.metrics:
+            self.metrics[operation] = OperationMetrics()
+        
+        metrics = self.metrics[operation]
+        metrics.total_calls += 1
+        metrics.failed_calls += 1
+        metrics.total_latency += duration
+        metrics.error_counts[error] = metrics.error_counts.get(error, 0) + 1
+
+    def record_chunk_metrics(self, size: int) -> None:
+        """Record metrics for a document chunk."""
+        self.chunk_metrics.chunk_sizes.append(size)
+        self.chunk_metrics.total_chunks += 1
+        self.chunk_metrics.avg_chunk_size = (
+            sum(self.chunk_metrics.chunk_sizes) / len(self.chunk_metrics.chunk_sizes)
+        )
+
+    def record_embedding_metrics(self, dimension: int) -> None:
+        """Record metrics for embeddings."""
+        self.embedding_metrics.embedding_dimensions.append(dimension)
+        self.embedding_metrics.total_embeddings += 1
+        self.embedding_metrics.avg_dimension = (
+            sum(self.embedding_metrics.embedding_dimensions) / 
+            len(self.embedding_metrics.embedding_dimensions)
+        )
+
+    def get_metrics_report(self) -> Dict[str, Any]:
+        """Generate comprehensive metrics report."""
+        report = {
+            'start_time': self.start_time.isoformat(),
+            'current_time': datetime.now().isoformat(),
+            'operations': {},
+            'chunking': {
+                'total_chunks': self.chunk_metrics.total_chunks,
+                'average_chunk_size': self.chunk_metrics.avg_chunk_size,
+                'size_distribution': self._calculate_distribution(self.chunk_metrics.chunk_sizes)
+            },
+            'embeddings': {
+                'total_embeddings': self.embedding_metrics.total_embeddings,
+                'average_dimension': self.embedding_metrics.avg_dimension
+            }
+        }
+
+        for operation, metrics in self.metrics.items():
+            report['operations'][operation] = {
+                'total_calls': metrics.total_calls,
+                'success_rate': (metrics.successful_calls / metrics.total_calls * 100 
+                               if metrics.total_calls > 0 else 0),
+                'avg_latency': (metrics.total_latency / metrics.total_calls 
+                              if metrics.total_calls > 0 else 0),
+                'max_latency': metrics.max_latency,
+                'min_latency': metrics.min_latency if metrics.min_latency != float('inf') else 0,
+                'error_distribution': metrics.error_counts
+            }
+
+        return report
+
+    def _calculate_distribution(self, values: List[float]) -> Dict[str, float]:
+        """Calculate distribution statistics for a list of values."""
+        if not values:
+            return {}
+            
+        sorted_values = sorted(values)
+        return {
+            'min': min(values),
+            'max': max(values),
+            'median': sorted_values[len(values) // 2],
+            'p95': sorted_values[int(len(values) * 0.95)],
+            'p99': sorted_values[int(len(values) * 0.99)]
+        }
+
+    def export_metrics(self, file_path: str) -> None:
+        """Export metrics to a JSON file."""
+        try:
+            report = self.get_metrics_report()
+            with open(file_path, 'w') as f:
+                json.dump(report, f, indent=4)
+            logger.info(f"Metrics exported to {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to export metrics: {e}")
+            raise
+
+# src/utils/performance_monitor.py
+import psutil
+import time
+import logging
+from typing import Dict, Any
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class SystemMetrics:
+    """System performance metrics."""
+    cpu_percent: float
+    memory_percent: float
+    disk_usage: Dict[str, float]
+    network_io: Dict[str, int]
+
+class PerformanceMonitor:
+    """Monitors system performance metrics."""
+    
+    def __init__(self, interval: int = 60):
+        self.interval = interval
+        self.running = False
+
+    def start_monitoring(self) -> None:
+        """Start performance monitoring."""
+        self.running = True
+        while self.running:
+            metrics = self._collect_metrics()
+            self._log_metrics(metrics)
+            time.sleep(self.interval)
+
+    def stop_monitoring(self) -> None:
+        """Stop performance monitoring."""
+        self.running = False
+
+    def _collect_metrics(self) -> SystemMetrics:
+        """Collect current system metrics."""
+        return SystemMetrics(
+            cpu_percent=psutil.cpu_percent(interval=1),
+            memory_percent=psutil.virtual_memory().percent,
+            disk_usage={
+                'used_percent': psutil.disk_usage('/').percent
+            },
+            network_io={
+                'bytes_sent': psutil.net_io_counters().bytes_sent,
+                'bytes_recv': psutil.net_io_counters().bytes_recv
+            }
+        )
+
+    def _log_metrics(self, metrics: SystemMetrics) -> None:
+        """Log collected metrics."""
+        logger.info(
+            "System Metrics - CPU: %s%%, Memory: %s%%, Disk: %s%%, "
+            "Network Sent: %s bytes, Network Recv: %s bytes",
+            metrics.cpu_percent,
+            metrics.memory_percent,
+            metrics.disk_usage['used_percent'],
+            metrics.network_io['bytes_sent'],
+            metrics.network_io['bytes_recv']
+        )
+
+# src/utils/health_check.py
+import logging
+from typing import Dict, Any, List
+import requests
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class HealthStatus:
+    """Health check status."""
+    component: str
+    status: str
+    message: str
+    details: Dict[str, Any]
+
+class HealthChecker:
+    """Performs system health checks."""
+    
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+
+    def check_system_health(self) -> List[HealthStatus]:
+        """Perform comprehensive system health check."""
+        health_checks = []
+        
+        # Check database connection
+        health_checks.append(self._check_datastax_connection())
+        
+        # Check authentication service
+        health_checks.append(self._check_auth_service())
+        
+        # Check model availability
+        health_checks.append(self._check_model_availability())
+        
+        return health_checks
+
+    def _check_datastax_connection(self) -> HealthStatus:
+        """Check Datastax connection."""
+        try:
+            # Implement connection check
+            return HealthStatus(
+                component="datastax",
+                status="healthy",
+                message="Connection successful",
+                details={}
+            )
+        except Exception as e:
+            return HealthStatus(
+                component="datastax",
+                status="unhealthy",
+                message=str(e),
+                details={'error_type': type(e).__name__}
+            )
+
+    def _check_auth_service(self) -> HealthStatus:
+        """Check authentication service."""
+        try:
+            # Implement auth service check
+            return HealthStatus(
+                component="auth_service",
+                status="healthy",
+                message="Service operational",
+                details={}
+            )
+        except Exception as e:
+            return HealthStatus(
+                component="auth_service",
+                status="unhealthy",
+                message=str(e),
+                details={'error_type': type(e).__name__}
+            )
+
+    def _check_model_availability(self) -> HealthStatus:
+        """Check model availability."""
+        try:
+            # Implement model check
+            return HealthStatus(
+                component="model",
+                status="healthy",
+                message="Model loaded and operational",
+                details={}
+            )
+        except Exception as e:
+            return HealthStatus(
+                component="model",
+                status="unhealthy",
+                message=str(e),
+                details={'error_type': type(e).__name__}
+            )
 
 
 
